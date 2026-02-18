@@ -21,7 +21,7 @@ class PositionalEncoding(nn.Module):
         return self.dropout(x)
 
 class ChessTransformer(nn.Module):
-    def __init__(self, inp_dict: int, out_dict: int, d_model: int, nhead: int, d_hid: int, nlayers: int, dropout: float = 0.5):
+    def __init__(self, inp_dict: int, d_model: int, nhead: int, d_hid: int, nlayers: int, dropout: float = 0.5):
         super().__init__()
         self.model_type = 'Chess-former'
 
@@ -38,8 +38,12 @@ class ChessTransformer(nn.Module):
         self.y_embedding = nn.Embedding(8, d_model)
         self.d_model = d_model
 
-        # Output linear layer
-        self.linear_output = nn.Linear(d_model, out_dict)
+        # Output heads
+        # from_head / to_head: per-square scalar logit  → (B, 64)
+        self.from_head = nn.Linear(d_model, 1)
+        self.to_head   = nn.Linear(d_model, 1)
+        # promo_head: mean-pooled board representation → 4 logits (q=0, r=1, b=2, n=3)
+        self.promo_head = nn.Linear(d_model, 4)
 
         # Initialization of weights
         self.init_weights()
@@ -49,10 +53,19 @@ class ChessTransformer(nn.Module):
         self.embedding.weight.data.uniform_(-initrange, initrange)
         self.x_embedding.weight.data.uniform_(-initrange, initrange)
         self.y_embedding.weight.data.uniform_(-initrange, initrange)
-        self.linear_output.bias.data.zero_()
-        self.linear_output.weight.data.uniform_(-initrange, initrange)
+        for head in (self.from_head, self.to_head, self.promo_head):
+            head.bias.data.zero_()
+            head.weight.data.uniform_(-initrange, initrange)
 
-    def forward(self, board: Tensor, src_mask: Tensor = None) -> Tensor:
+    def forward(self, board: Tensor, src_mask: Tensor = None):
+        """
+        Args:
+            board: (B, 64) long tensor of piece indices
+        Returns:
+            from_logits:  (B, 64)  — logit for each square being the source
+            to_logits:    (B, 64)  — logit for each square being the destination
+            promo_logits: (B, 4)   — logit for each promotion piece (q/r/b/n)
+        """
         board_emb = self.embedding(board)
 
         # Generating input for positional embeddings
@@ -66,10 +79,15 @@ class ChessTransformer(nn.Module):
         # Combining embeddings
         combined_emb = board_emb + x_emb + y_emb
 
-        # Scaling and passing through transformer
+        # Scaling and passing through transformer  — (B, 64, d_model)
         combined_emb = combined_emb * math.sqrt(self.d_model)
-        output = self.transformer_encoder(combined_emb.permute(1, 0, 2)).permute(1, 0, 2)
+        enc = self.transformer_encoder(combined_emb.permute(1, 0, 2)).permute(1, 0, 2)
 
-        # Applying linear layer to the output
-        output = self.linear_output(output)
-        return output
+        # Per-square heads  (B, 64, 1) → squeeze → (B, 64)
+        from_logits = self.from_head(enc).squeeze(-1)
+        to_logits   = self.to_head(enc).squeeze(-1)
+
+        # Global promo head: mean-pool across the 64 squares → (B, d_model) → (B, 4)
+        promo_logits = self.promo_head(enc.mean(dim=1))
+
+        return from_logits, to_logits, promo_logits

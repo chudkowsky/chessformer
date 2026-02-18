@@ -29,7 +29,6 @@ d_hid = d_model * 2
 nhead = 8
 nlayers = 12
 inp_ntoken = 13
-out_ntoken = 2
 start_time = time.time()
 
 # Check for GPU availability
@@ -52,12 +51,13 @@ def train(model: str = ""):
         model = torch.load(f'models/{START_MODEL}')
         print(f'Using Pretrained Model: {START_MODEL}')
     else:
-        model = ChessTransformer(inp_ntoken, out_ntoken, d_model, nhead, d_hid, nlayers, dropout=dropout).to(device)
+        model = ChessTransformer(inp_ntoken, d_model, nhead, d_hid, nlayers, dropout=dropout).to(device)
 
     print(f'Creating New Model: {END_MODEL}_best_whole.pth\nDataset: {DATASET}\n')
 
     # Loss Function and Optimizer setup
-    loss_fn = nn.CrossEntropyLoss()
+    loss_fn = nn.CrossEntropyLoss()  # used for from/to heads (64 classes)
+    promo_loss_fn = nn.CrossEntropyLoss()  # used for promo head (4 classes)
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(num_epochs / INCREMENTS), gamma=GAMMA)
 
@@ -72,8 +72,12 @@ def train(model: str = ""):
         total_loss = 0
         for batch, (boards, target) in enumerate(dataloader):
             boards, target = boards.to(device), target.to(device)
-            output = model(boards)
-            loss = loss_fn(output, target)
+            from_logits, to_logits, promo_logits = model(boards)
+            # target: (B, 3) → [from_sq, to_sq, promo_idx]  promo_idx=-1 means no promotion
+            loss = loss_fn(from_logits, target[:, 0]) + loss_fn(to_logits, target[:, 1])
+            promo_mask = target[:, 2] >= 0
+            if promo_mask.any():
+                loss = loss + promo_loss_fn(promo_logits[promo_mask], target[promo_mask, 2])
             optimizer.zero_grad()
             loss.backward()
             if CLIP:
@@ -95,8 +99,11 @@ def train(model: str = ""):
         with torch.no_grad():
             for batch in testloader:
                 boards, target = batch[0].to(device), batch[1].to(device)
-                output = model(boards)
-                loss = loss_fn(output, target)
+                from_logits, to_logits, promo_logits = model(boards)
+                loss = loss_fn(from_logits, target[:, 0]) + loss_fn(to_logits, target[:, 1])
+                promo_mask = target[:, 2] >= 0
+                if promo_mask.any():
+                    loss = loss + promo_loss_fn(promo_logits[promo_mask], target[promo_mask, 2])
                 tot_test_loss += loss.item()
 
         # Save the best model

@@ -3,12 +3,13 @@ import chess
 from chess_loader import ChessDataset
 from chessformer import ChessTransformer
 from chess_moves_to_input_data import get_board_str, switch_player, switch_move
+from policy import greedy_move, legal_move_policy
 from torch.utils.data import DataLoader
 from copy import deepcopy
 import time
 
 # Configuration
-MODEL = "2000_elo_pos_engine_best_test_whole.pth"
+MODEL = "2000_elo_pos_engine_3head.pth"
 
 # Model and device setup
 if torch.backends.mps.is_available():
@@ -31,36 +32,33 @@ def preprocess(board):
     board_pieces = [piece_to_index[p] for p in board_str]
     return torch.tensor([board_pieces], dtype=torch.long).to(device)
 
-# Helper functions for postprocessing
-def sq_to_str(sq):
-    """
-    Converts a square index to algebraic notation.
-    """
-    return chr(ord('a') + sq % 8) + str(8 - sq // 8)
-
 def postprocess_valid(output, board: chess.Board, rep_mv=""):
     """
-    Converts model output to a valid chess move.
+    Converts model output to the best legal chess move (UCI string).
+
+    output is the 3-tuple (from_logits, to_logits, promo_logits) returned
+    by ChessTransformer.forward, each with a batch dimension of 1.
+    rep_mv is an optional move string to avoid (repetition avoidance).
     """
     start = time.time()
-    single_output = output[0].tolist()
-    all_moves = []
-    for i, st_sqr in enumerate(single_output):
-        for j, end_sq in enumerate(single_output):
-            if i != j:
-                all_moves.append(((i, st_sqr[0]), (j, end_sq[1])))
+    from_logits, to_logits, promo_logits = output
+    # Strip the batch dimension → (64,), (64,), (4,)
+    from_logits  = from_logits[0]
+    to_logits    = to_logits[0]
+    promo_logits = promo_logits[0]
 
-    all_moves.sort(key=lambda x: x[0][1] + x[1][1], reverse=True)
-    legal_moves = [str(move) for move in board.legal_moves]
+    moves, probs, _ = legal_move_policy(board, from_logits, to_logits, promo_logits)
 
-    for mv in all_moves:
-        mv_str = sq_to_str(mv[0][0]) + sq_to_str(mv[1][0])
-        if not board.turn:
-            mv_str = switch_move(mv_str, wht_turn=board.turn, normal_format=True)
-        if mv_str in legal_moves and mv_str != rep_mv:
-            print(f'Move: {mv_str} = {chess.Board.san(board, chess.Move.from_uci(mv_str))}')
+    # Sort by descending probability, skip the repetition move if provided
+    order = probs.argsort(descending=True)
+    for idx in order:
+        move = moves[idx.item()]
+        mv_str = move.uci()
+        if mv_str != rep_mv:
+            print(f'Move: {mv_str} = {board.san(move)}')
             print('Completed in:', str(time.time() - start))
             return mv_str
+
     print('Completed in:', str(time.time() - start))
     return None
 
@@ -79,7 +77,7 @@ if __name__ == '__main__':
         input_tensors = preprocess(board)
         count += 1
         with torch.no_grad():
-            output = model(*input_tensors)
+            output = model(input_tensors)
         uci_move = postprocess_valid(output, board)
         board.push(chess.Move.from_uci(uci_move))
         print(f'Predicted {count}\n', board)
