@@ -5,9 +5,12 @@ Chess AI built on a Transformer encoder. Looks at the board once, predicts the b
 ## Quick start
 
 ```bash
-pip install -r requirements.txt
+git clone https://github.com/chudkowsky/chessformer.git
+cd chessformer
 uv run python play_gui.py
 ```
+
+> Requires [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.10+, and [Git LFS](https://git-lfs.com/) (for model weights). Install LFS with `git lfs install` before cloning.
 
 ## Train your own model
 
@@ -32,7 +35,13 @@ Arguments: `<pgn_file> <output_file> <min_elo> [max_positions]`
 **3. Train:**
 
 ```bash
-uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num-pos 1e6                   # NVIDIA GPU
+# Train from scratch (batch-size 512 is safe for 12GB+ VRAM)
+uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num-pos 5e6 --batch-size 512 --epochs 100 --patience 5
+
+# Fine-tune existing model with lower learning rate
+uv run python train_model.py 2000 --resume models/2000_elo_pos_engine.pth --dataset full_datasets/elo_2000_pos.txt --num-pos 5e6 --batch-size 512 --lr 1e-5 --epochs 50 --patience 5
+
+# Mac / CPU
 uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num-pos 1e6 --device mps     # Mac
 uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num-pos 1e6 --device cpu     # CPU
 ```
@@ -42,6 +51,11 @@ uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num
 | `--dataset` | `full_datasets/elo_{elo}_pos.txt` | Path to training data file |
 | `--num-pos` | `1000000` | Number of positions to load |
 | `--device` | `auto` | `auto`, `cuda`, `mps`, or `cpu` |
+| `--resume` | — | Path to existing model to continue training |
+| `--lr` | `1e-4` | Learning rate (lower for fine-tuning, e.g. `1e-5`) |
+| `--epochs` | `10` | Number of training epochs |
+| `--patience` | — | Early stopping: stop after N epochs without improvement |
+| `--batch-size` | `1024` | Batch size (lower for less VRAM, e.g. `512` for 12GB) |
 
 > **AMD GPU (ROCm):** Prefix with `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` to enable Flash Attention.
 
@@ -51,7 +65,7 @@ uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num
 
 64 board squares → piece/file/rank embeddings → 12-layer Transformer encoder (8 heads, d_model=512) → per-square (from_score, to_score) → highest-ranked legal move is played.
 
-~37M parameters | batch size 512 | AdamW (LR 1e-4) | AMP on CUDA/ROCm
+~25M parameters | batch size 1024 | AdamW (LR 1e-4) | AMP on CUDA/ROCm
 
 ## Game modes
 

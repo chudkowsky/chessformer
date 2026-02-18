@@ -72,15 +72,31 @@ for _tar_path in glob.glob(os.path.join(_base, "*stockfish*.tar*")):
         print(f"Stockfish extracted to: {os.path.join(_base, 'stockfish')}")
     break
 
-_sf_path = input("Path to Stockfish binary (or press Enter to skip): ").strip()
+# Changed: auto-detect stockfish binary from stockfish/ dir, skip prompt if found
+_sf_default = ""
+for _bin in glob.glob(os.path.join(_base, "stockfish", "stockfish*")):
+    if os.path.isfile(_bin) and not _bin.endswith((".tar", ".zip")):
+        _sf_default = _bin
+        break
+
+if _sf_default:
+    _sf_path = input(f"Path to Stockfish binary (Enter for {os.path.basename(_sf_default)}, 'n' to skip): ").strip()
+    if _sf_path.lower() == 'n':
+        _sf_path = ""
+    elif not _sf_path:
+        _sf_path = _sf_default
+else:
+    _sf_path = input("Path to Stockfish binary (or press Enter to skip): ").strip()
+
 try:
     _sf_engine = chess.engine.SimpleEngine.popen_uci(_sf_path) if _sf_path else None
 except FileNotFoundError:
     _sf_engine = None
     print("Stockfish not found at that path. Move rating disabled.")
 
-_delay_str = input("AI vs AI delay in seconds (default 1): ").strip()
-_ai_vs_ai_delay = float(_delay_str) if _delay_str else 1.0
+# Changed: default delay 0.1s instead of 1s
+_delay_str = input("AI vs AI delay in seconds (default 0.1): ").strip()
+_ai_vs_ai_delay = float(_delay_str) if _delay_str else 0.1
 
 LABELS = ["Excellent (!)", "Good", "Inaccuracy (?!)", "Mistake (?)", "Blunder (??)"]
 

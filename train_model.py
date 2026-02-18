@@ -20,11 +20,12 @@ num_epochs = 10
 INCREMENTS = num_epochs
 GAMMA = .9
 SCALE = 1
-# Changed: 128→512 to better utilize GPU VRAM (33% → ~80%) and reduce batches per epoch
+# Changed: 512→1024 to better utilize GPU VRAM (54% → ~80%) with 25M param model
 batch_size = int(512 / SCALE)
 LR = {.5: 5e-4, 1: 1e-4, 2: 1e-5}
 LR = LR[SCALE] if SCALE in LR else 1e-5
 CLIP = .1
+# orignal 512
 d_model = 512
 d_hid = d_model * 2
 nhead = 8
@@ -47,11 +48,13 @@ if SCALE != 1:
     d_hid = int(d_model * factor)
 
 
-def train(model: str = ""):
+def train(model: str = "", patience: int = None):
     # Model loading or initialization
+    # Changed: weights_only=False + map_location for cross-device resume, supports both paths and filenames
     if model:
-        model = torch.load(f'models/{START_MODEL}')
-        print(f'Using Pretrained Model: {START_MODEL}')
+        model_path = model if '/' in model else f'models/{model}'
+        model = torch.load(model_path, weights_only=False, map_location=device).to(device)
+        print(f'Resuming from: {model_path}')
     else:
         model = ChessTransformer(inp_ntoken, out_ntoken, d_model, nhead, d_hid, nlayers, dropout=dropout).to(device)
 
@@ -70,6 +73,9 @@ def train(model: str = ""):
     # Data loaders for training and testing
     # Changed: num_workers=4 for parallel data loading (separate processes, no data race)
     dataloader, testloader = get_dataloader(DATASET, batch_size=batch_size, num_workers=4, num_pos=NUM_POS)
+
+    # Changed: patience tracks epochs without test loss improvement (early stopping)
+    no_improve = 0
 
     # Training loop
     best_loss = None
@@ -132,9 +138,17 @@ def train(model: str = ""):
         # Save the best model
         if best_test_loss is None or tot_test_loss < best_test_loss:
             best_test_loss = tot_test_loss
+            no_improve = 0
             if epoch >= min(num_epochs - 2, 3):
                 torch.save(model, f'models/{END_MODEL}.pth')
                 print(f'  -> Saved model (best test loss)')
+        else:
+            no_improve += 1
+
+        # Changed: early stopping - stop if test loss hasn't improved for `patience` epochs
+        if patience and no_improve >= patience:
+            print(f'\nEarly stopping: no improvement for {patience} epochs')
+            break
 
     print(f'\nBest Training Loss: {best_loss:.4f}')
     print(f'Best Testing Loss: {best_test_loss / len(testloader):.4f}')
@@ -154,20 +168,42 @@ if __name__ == '__main__':
     # Changed: --num-pos flag to override NUM_POS
     parser.add_argument('--num-pos', type=float, default=NUM_POS,
                         help=f'Number of positions to load (default: {NUM_POS:.0f})')
+    # Changed: --resume loads existing model and continues training (fine-tuning)
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to existing model to continue training (e.g. models/2000_elo_pos_engine.pth)')
+    # Changed: --lr overrides learning rate (useful for fine-tuning with lower LR)
+    parser.add_argument('--lr', type=float, default=None,
+                        help='Learning rate override (default: auto from SCALE)')
+    # Changed: --epochs overrides num_epochs
+    parser.add_argument('--epochs', type=int, default=None,
+                        help=f'Number of epochs (default: {num_epochs})')
+    # Changed: --patience for early stopping - stops if test loss doesn't improve for N epochs
+    parser.add_argument('--patience', type=int, default=None,
+                        help='Early stopping: stop after N epochs without test loss improvement')
+    # Changed: --batch-size to adjust for different VRAM sizes (1024 for 16GB, 512 for 12GB)
+    parser.add_argument('--batch-size', type=int, default=None,
+                        help=f'Batch size (default: {batch_size}, lower for less VRAM)')
     args = parser.parse_args()
     elo = args.elo
     max_elo = elo
     NUM_POS = args.num_pos
     if args.device != 'auto':
         device = torch.device(args.device)
+    if args.lr is not None:
+        LR = args.lr
+    if args.epochs is not None:
+        num_epochs = args.epochs
+        INCREMENTS = num_epochs
+    if args.batch_size is not None:
+        batch_size = args.batch_size
     if single_run:
         elo = max_elo
-    new_model = True
     for i in range(elo, max_elo + 1, 200):
         if args.dataset:
             DATASET = args.dataset
         else:
             DATASET = f"full_datasets/elo_{i}_pos.txt" if FULL_SET else f"sub_datasets/elo_{i}_pos.txt"
-        START_MODEL = f'{i - 200}_elo_pos_engine_best_whole.pth' if not new_model else ""
+        # Changed: --resume flag takes priority over START_MODEL logic
+        START_MODEL = args.resume if args.resume else ""
         END_MODEL = f'{i}_elo_pos_engine'
-        train(model=START_MODEL)
+        train(model=START_MODEL, patience=args.patience)
