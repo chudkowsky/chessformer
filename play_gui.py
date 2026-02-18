@@ -120,7 +120,7 @@ def _quality_color(q: float):
 
 
 def _load_model(path):
-    m = torch.load(path, map_location="cpu").to(device)
+    m = torch.load(path, weights_only=False, map_location="cpu").to(device)
     m.eval()
     return m
 
