@@ -9,14 +9,12 @@ DIR = 'full_datasets'
 def switch_move(move: str, wht_turn: bool = True, normal_format: bool = False) -> str:
     """
     Adjusts a move string based on the player's turn.
-    Preserves the optional 5th promotion character (e.g. 'e7e8q').
     """
     if not normal_format:
-        move = move[1:]  # strip the leading piece-label prefix
-    promo = move[4] if len(move) > 4 else ''
+        move = move[1:5]
     if wht_turn:
-        return move[:4] + promo
-    return move[0] + str(9 - int(move[1])) + move[2] + str(9 - int(move[3])) + promo
+        return move
+    return move[0] + str(9 - int(move[1])) + move[2] + str(9 - int(move[3]))
 
 def switch_player(board_str):
     """
