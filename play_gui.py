@@ -121,11 +121,12 @@ class ChessGUI:
         self.clock = pygame.time.Clock()
 
         # Fonts
-        self.piece_font  = self._init_piece_font(56)
-        self.label_font  = pygame.font.SysFont("sans", 13)
-        self.status_font = pygame.font.SysFont("sans", 20)
-        self.btn_font    = pygame.font.SysFont("sans", 24, bold=True)
-        self.title_font  = pygame.font.SysFont("sans", 48, bold=True)
+        self.piece_font   = self._init_piece_font(56)
+        self.label_font   = pygame.font.SysFont("sans", 13)
+        self.status_font  = pygame.font.SysFont("sans", 20)
+        self.btn_font     = pygame.font.SysFont("sans", 24, bold=True)
+        self.title_font   = pygame.font.SysFont("sans", 48, bold=True)
+        self.summary_font = pygame.font.SysFont("sans", 17)
 
         # Game state
         self.board        = chess.Board()
@@ -396,13 +397,14 @@ class ChessGUI:
         self.move_quality.append((quality, was_white))
         self.made_moves.append(move.uci())
         self.last_move = move
-        cp_loss = round((1.0 - quality) * 200)
-        if cp_loss <= 10:   label = "Excellent (!)"
-        elif cp_loss <= 25: label = "Good"
-        elif cp_loss <= 50: label = "Inaccuracy (?!)"
-        elif cp_loss <= 100: label = "Mistake (?)"
-        else:               label = "Blunder (??)"
-        self.move_log.append((who, cp_loss, label))
+        if self.sf_engine is not None:
+            cp_loss = round((1.0 - quality) * 200)
+            if cp_loss <= 10:    label = "Excellent (!)"
+            elif cp_loss <= 25:  label = "Good"
+            elif cp_loss <= 50:  label = "Inaccuracy (?!)"
+            elif cp_loss <= 100: label = "Mistake (?)"
+            else:                label = "Blunder (??)"
+            self.move_log.append((who, cp_loss, label))
 
     def handle_click(self, pos):
         if self.game_over or self.is_ai_turn():
@@ -430,13 +432,14 @@ class ChessGUI:
                     self.move_quality.append((quality, was_white))
                     self.made_moves.append(move.uci())
                     self.last_move = move
-                    cp_loss = round((1.0 - quality) * 200)
-                    if cp_loss <= 10:    label = "Excellent (!)"
-                    elif cp_loss <= 25:  label = "Good"
-                    elif cp_loss <= 50:  label = "Inaccuracy (?!)"
-                    elif cp_loss <= 100: label = "Mistake (?)"
-                    else:                label = "Blunder (??)"
-                    self.move_log.append(("You", cp_loss, label))
+                    if self.sf_engine is not None:
+                        cp_loss = round((1.0 - quality) * 200)
+                        if cp_loss <= 10:    label = "Excellent (!)"
+                        elif cp_loss <= 25:  label = "Good"
+                        elif cp_loss <= 50:  label = "Inaccuracy (?!)"
+                        elif cp_loss <= 100: label = "Mistake (?)"
+                        else:                label = "Blunder (??)"
+                        self.move_log.append(("You", cp_loss, label))
                     self.selected_sq = None
                     self.legal_dests = set()
                     return True
@@ -456,6 +459,77 @@ class ChessGUI:
                 self.legal_dests = {m.to_square for m in self.board.legal_moves
                                     if m.from_square == sq}
         return False
+
+    # --- Summary overlay ---
+
+    def draw_summary_screen(self):
+        if not self.move_log:
+            return
+
+        LABEL_COLORS = {
+            "Excellent (!)":   (80,  210,  80),
+            "Good":            (140, 210,  80),
+            "Inaccuracy (?!)": (220, 200,  60),
+            "Mistake (?)":     (220, 140,  50),
+            "Blunder (??)":    (220,  70,  70),
+        }
+
+        overlay = pygame.Surface(WIN_SIZE, pygame.SRCALPHA)
+        overlay.fill((10, 10, 10, 215))
+        self.screen.blit(overlay, (0, 0))
+
+        title = self.btn_font.render("Stockfish Analysis", True, TEXT_COLOR)
+        self.screen.blit(title, title.get_rect(center=(WIN_W // 2, 32)))
+        pygame.draw.line(self.screen, (80, 80, 80), (30, 56), (WIN_W - 30, 56), 1)
+
+        players  = list(dict.fromkeys(w for w, _, _ in self.move_log))
+        n        = len(players)
+        panel_w  = 290
+        gap      = 24
+        total_w  = n * panel_w + (n - 1) * gap
+        start_x  = (WIN_W - total_w) // 2
+
+        for i, who in enumerate(players):
+            moves = [(cp, lbl) for (w, cp, lbl) in self.move_log if w == who]
+            if not moves:
+                continue
+            counts  = {lbl: 0 for lbl in LABELS}
+            for cp, lbl in moves:
+                counts[lbl] += 1
+            avg_cp   = sum(cp for cp, _ in moves) / len(moves)
+            accuracy = max(0.0, min(100.0, 100 * math.exp(-avg_cp / 150)))
+
+            px = start_x + i * (panel_w + gap)
+            y  = 70
+
+            s = self.status_font.render(f"{who}  —  {len(moves)} moves", True, TEXT_COLOR)
+            self.screen.blit(s, s.get_rect(centerx=px + panel_w // 2, y=y))
+            y += 30
+            pygame.draw.line(self.screen, (60, 60, 60), (px, y), (px + panel_w, y), 1)
+            y += 8
+
+            for lbl in LABELS:
+                s  = self.summary_font.render(lbl, True, LABEL_COLORS[lbl])
+                s2 = self.summary_font.render(str(counts[lbl]), True, TEXT_COLOR)
+                self.screen.blit(s,  (px + 8, y))
+                self.screen.blit(s2, s2.get_rect(right=px + panel_w - 8, y=y))
+                y += 26
+
+            y += 4
+            pygame.draw.line(self.screen, (50, 50, 50), (px, y), (px + panel_w, y), 1)
+            y += 8
+
+            s  = self.summary_font.render("Avg cp loss", True, (160, 160, 160))
+            s2 = self.summary_font.render(f"{avg_cp:.1f}", True, TEXT_COLOR)
+            self.screen.blit(s,  (px + 8, y))
+            self.screen.blit(s2, s2.get_rect(right=px + panel_w - 8, y=y))
+            y += 32
+
+            acc_color = _quality_color(accuracy / 100)
+            s  = self.btn_font.render(f"{accuracy:.1f}%", True, acc_color)
+            s2 = self.label_font.render("accuracy", True, (140, 140, 140))
+            self.screen.blit(s,  s.get_rect(centerx=px + panel_w // 2, y=y))
+            self.screen.blit(s2, s2.get_rect(centerx=px + panel_w // 2, y=y + 30))
 
     # --- Main loop ---
 
@@ -519,7 +593,7 @@ class ChessGUI:
                         self.update_status()
                         self.next_ai_move_at = pygame.time.get_ticks() + int(self.ai_vs_ai_delay * 1000)
 
-                # Print summary once when game ends
+                # Print terminal summary once when game ends
                 if self.game_over and not self.summary_done:
                     print_summary(self.move_log)
                     self.summary_done = True
@@ -527,6 +601,8 @@ class ChessGUI:
                 self.draw_quality_bar()
                 self.draw_board()
                 self.draw_status()
+                if self.game_over:
+                    self.draw_summary_screen()
 
             pygame.display.flip()
             self.clock.tick(30)
