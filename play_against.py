@@ -114,13 +114,14 @@ def is_over():
             or board.is_insufficient_material() or board.can_claim_draw())
 
 
-def ai_make_move(who: str):
+def ai_make_move(who: str, mdl=None):
     """Run the model for the current position, push the move, log the rating."""
+    _mdl = mdl if mdl is not None else model
     input_tensors = preprocess(board)
 
     def predict(rep_mv=""):
         with torch.no_grad():
-            output = model(input_tensors)
+            output = _mdl(input_tensors)
         return postprocess_valid(output, board, rep_mv=rep_mv)
 
     uci_move = predict()
@@ -198,6 +199,13 @@ while True:
 
 # ── AI vs AI ─────────────────────────────────────────────────────────────────
 if mode == "2":
+    _MODEL_WHITE = "2000_elo_pos_engine.pth"
+    _MODEL_BLACK = "2000_elo_pos_engine.pth"
+    print(f"White: {_MODEL_WHITE}")
+    print(f"Black: {_MODEL_BLACK}")
+    model_white = torch.load(f'models/{_MODEL_WHITE}', map_location="cpu").to(device)
+    model_black = torch.load(f'models/{_MODEL_BLACK}', map_location="cpu").to(device)
+
     delay_str = input("Delay between moves in seconds (default 1): ").strip()
     delay = float(delay_str) if delay_str else 1.0
 
@@ -205,8 +213,12 @@ if mode == "2":
     try:
         while not is_over():
             count += 1
-            who  = "White" if board.turn == chess.WHITE else "Black"
-            move, cp_loss, label = ai_make_move(who)
+            if board.turn == chess.WHITE:
+                who = f"White ({_MODEL_WHITE})"
+                move, cp_loss, label = ai_make_move(who, mdl=model_white)
+            else:
+                who = f"Black ({_MODEL_BLACK})"
+                move, cp_loss, label = ai_make_move(who, mdl=model_black)
             rating_str = f"  →  {label} (cp loss: {cp_loss})" if label else ""
             print(board)
             print(f"Move {count} ({who}): {move}{rating_str}")

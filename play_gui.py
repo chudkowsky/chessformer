@@ -40,9 +40,7 @@ PIECE_UNICODE = {
     'r': '\u265c', 'n': '\u265e', 'b': '\u265d', 'q': '\u265b', 'k': '\u265a', 'p': '\u265f',
 }
 
-# --- Model setup ---
-MODEL = "2000_elo_pos_engine.pth"
-
+# --- Device setup ---
 if torch.backends.mps.is_available():
     device = torch.device("mps")
 elif torch.cuda.is_available():
@@ -50,11 +48,11 @@ elif torch.cuda.is_available():
 else:
     device = torch.device("cpu")
 
-model = torch.load(f'models/{MODEL}', map_location="cpu").to(device)
-model.eval()
+_script_dir = os.path.dirname(os.path.abspath(__file__))
+AVAILABLE_MODELS = sorted(glob.glob(os.path.join(_script_dir, "models", "*.pth")))
 
 # Stockfish setup — extract tar if present
-_base = os.path.dirname(os.path.abspath(__file__))
+_base = _script_dir
 for _tar_path in glob.glob(os.path.join(_base, "*stockfish*.tar*")):
     if not os.path.isdir(os.path.join(_base, "stockfish")):
         with tarfile.open(_tar_path) as _tf:
@@ -112,9 +110,17 @@ def _quality_color(q: float):
     return (r, g, 30)
 
 
+def _load_model(path):
+    m = torch.load(path, map_location="cpu").to(device)
+    m.eval()
+    return m
+
+
 class ChessGUI:
     def __init__(self):
-        self.sf_engine = _sf_engine
+        self.sf_engine   = _sf_engine
+        self.model_white = None
+        self.model_black = None
         pygame.init()
         self.screen = pygame.display.set_mode(WIN_SIZE)
         pygame.display.set_caption("Chessformer")
@@ -139,12 +145,13 @@ class ChessGUI:
         self.ai_vs_ai        = False
         self.vs_stockfish    = False
         self.sf_color_screen = False
+        self.model_screen    = True   # shown first
         self.model_is_white  = True
         self.ai_vs_ai_delay  = _ai_vs_ai_delay
         self.next_ai_move_at = 0       # pygame ticks for next AI move
         self.game_started    = False
         self.game_over       = False
-        self.status_text     = "Choose game mode"
+        self.status_text     = "Select a model"
         self.summary_done    = False
 
         # Move quality history: list of (q ∈ [0,1], is_white_move)
@@ -152,8 +159,17 @@ class ChessGUI:
         # Stockfish move log: list of (who, cp_loss, label)
         self.move_log = []
 
-        # Start screen buttons — four buttons centred in the window
+        # Model selection buttons — one per .pth file, stacked vertically
         cx  = WIN_W // 2
+        mbw, mbh, mgap = 380, 48, 12
+        model_start_y = 220
+        self.model_btns = []
+        for i, path in enumerate(AVAILABLE_MODELS):
+            name = os.path.splitext(os.path.basename(path))[0]
+            y = model_start_y + i * (mbh + mgap)
+            self.model_btns.append((pygame.Rect(cx - mbw // 2, y, mbw, mbh), name, path))
+
+        # Start screen buttons — four buttons centred in the window
         bw, bh, gap = 140, 50, 10
         total = 4 * bw + 3 * gap
         x0 = cx - total // 2
@@ -317,6 +333,24 @@ class ChessGUI:
         s = self.status_font.render(self.status_text, True, TEXT_COLOR)
         self.screen.blit(s, s.get_rect(center=bar.center))
 
+    def draw_model_screen(self):
+        self.screen.fill((40, 40, 40))
+        cx = WIN_W // 2
+        s = self.title_font.render("Chessformer", True, TEXT_COLOR)
+        self.screen.blit(s, s.get_rect(center=(cx, 120)))
+        s = self.status_font.render("Select a model", True, TEXT_COLOR)
+        self.screen.blit(s, s.get_rect(center=(cx, 180)))
+        mouse = pygame.mouse.get_pos()
+        if not self.model_btns:
+            s = self.status_font.render("No models found in models/", True, (200, 80, 80))
+            self.screen.blit(s, s.get_rect(center=(cx, 260)))
+        for btn, name, _path in self.model_btns:
+            col = BTN_HOVER if btn.collidepoint(mouse) else BTN_COLOR
+            pygame.draw.rect(self.screen, col, btn, border_radius=8)
+            s = self.btn_font.render(name, True, BTN_TEXT)
+            self.screen.blit(s, s.get_rect(center=btn.center))
+        self.draw_status()
+
     def draw_start_screen(self):
         self.screen.fill((40, 40, 40))
         cx = WIN_W // 2
@@ -372,11 +406,16 @@ class ChessGUI:
     def ai_move(self, who: str = "AI"):
         if self.game_over:
             return
+        # In AI vs AI, use the model assigned to that color; otherwise use white model
+        if self.ai_vs_ai:
+            mdl = self.model_white if self.board.turn == chess.WHITE else self.model_black
+        else:
+            mdl = self.model_white
         input_tensors = preprocess(self.board)
 
         def predict(rep_mv=""):
             with torch.no_grad():
-                output = model(input_tensors)
+                output = mdl(input_tensors)
             return postprocess_valid(output, self.board, rep_mv=rep_mv)
 
         uci = predict()
@@ -593,7 +632,19 @@ class ChessGUI:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if self.sf_color_screen:
+                    if self.model_screen:
+                        for btn, name, path in self.model_btns:
+                            if btn.collidepoint(event.pos):
+                                self.status_text = f"Loading {name}..."
+                                self.draw_model_screen()
+                                pygame.display.flip()
+                                mdl = _load_model(path)
+                                self.model_white = mdl
+                                self.model_black = mdl
+                                self.model_screen = False
+                                self.status_text = "Choose game mode"
+                                break
+                    elif self.sf_color_screen:
                         if self.sf_white_btn.collidepoint(event.pos):
                             self.model_is_white  = True
                             self.vs_stockfish    = True
@@ -634,7 +685,9 @@ class ChessGUI:
                             if not self.game_over and self.is_ai_turn():
                                 need_ai_move = True
 
-            if self.sf_color_screen:
+            if self.model_screen:
+                self.draw_model_screen()
+            elif self.sf_color_screen:
                 self.draw_sf_color_screen()
             elif not self.game_started:
                 self.draw_start_screen()
