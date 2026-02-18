@@ -3,3 +3,4 @@ torchvision==0.17.0
 torchaudio==2.2.0
 numpy==1.26.3
 python-chess==1.999
+pygame
