@@ -136,27 +136,34 @@ class ChessGUI:
         self.last_move    = None
         self.flipped      = False
         self.ai_is_black  = True
-        self.ai_vs_ai     = False
-        self.ai_vs_ai_delay = _ai_vs_ai_delay
+        self.ai_vs_ai        = False
+        self.vs_stockfish    = False
+        self.sf_color_screen = False
+        self.model_is_white  = True
+        self.ai_vs_ai_delay  = _ai_vs_ai_delay
         self.next_ai_move_at = 0       # pygame ticks for next AI move
-        self.game_started = False
-        self.game_over    = False
-        self.status_text  = "Choose your color"
-        self.summary_done = False
+        self.game_started    = False
+        self.game_over       = False
+        self.status_text     = "Choose game mode"
+        self.summary_done    = False
 
         # Move quality history: list of (q ∈ [0,1], is_white_move)
         self.move_quality = []
         # Stockfish move log: list of (who, cp_loss, label)
         self.move_log = []
 
-        # Start screen buttons — three buttons centred in the window
+        # Start screen buttons — four buttons centred in the window
         cx  = WIN_W // 2
-        bw, bh, gap = 110, 50, 20
-        total = 3 * bw + 2 * gap
+        bw, bh, gap = 140, 50, 10
+        total = 4 * bw + 3 * gap
         x0 = cx - total // 2
-        self.white_btn    = pygame.Rect(x0,            300, bw, bh)
-        self.black_btn    = pygame.Rect(x0 + bw + gap, 300, bw, bh)
-        self.ai_vs_ai_btn = pygame.Rect(x0 + 2*(bw+gap), 300, bw, bh)
+        self.white_btn    = pygame.Rect(x0,               300, bw, bh)
+        self.black_btn    = pygame.Rect(x0 +   bw + gap,  300, bw, bh)
+        self.ai_vs_ai_btn = pygame.Rect(x0 + 2*(bw+gap),  300, bw, bh)
+        self.vs_sf_btn    = pygame.Rect(x0 + 3*(bw+gap),  300, bw, bh)
+        # SF color sub-screen buttons
+        self.sf_white_btn = pygame.Rect(cx - 130, 300, 110, bh)
+        self.sf_black_btn = pygame.Rect(cx +  20, 300, 110, bh)
 
     def _init_piece_font(self, size):
         for name in ["DejaVu Sans", "Noto Sans Symbols2", "Noto Sans Symbols",
@@ -315,14 +322,20 @@ class ChessGUI:
         cx = WIN_W // 2
         s = self.title_font.render("Chessformer", True, TEXT_COLOR)
         self.screen.blit(s, s.get_rect(center=(cx, 150)))
-        s = self.status_font.render("Choose your color", True, TEXT_COLOR)
+        s = self.status_font.render("Choose game mode", True, TEXT_COLOR)
         self.screen.blit(s, s.get_rect(center=(cx, 220)))
         mouse = pygame.mouse.get_pos()
-        for btn, label in [(self.white_btn, "White"), (self.black_btn, "Black"),
-                           (self.ai_vs_ai_btn, "AI vs AI")]:
-            color = BTN_HOVER if btn.collidepoint(mouse) else BTN_COLOR
-            pygame.draw.rect(self.screen, color, btn, border_radius=8)
-            s = self.btn_font.render(label, True, BTN_TEXT)
+        sf_ok = self.sf_engine is not None
+        for btn, label, enabled in [
+            (self.white_btn,    "Play White",   True),
+            (self.black_btn,    "Play Black",   True),
+            (self.ai_vs_ai_btn, "AI vs AI",     True),
+            (self.vs_sf_btn,    "vs Stockfish", sf_ok),
+        ]:
+            col = (BTN_HOVER if btn.collidepoint(mouse) else BTN_COLOR) if enabled else (55, 55, 55)
+            pygame.draw.rect(self.screen, col, btn, border_radius=8)
+            tc = BTN_TEXT if enabled else (110, 110, 110)
+            s = self.btn_font.render(label, True, tc)
             self.screen.blit(s, s.get_rect(center=btn.center))
         self.draw_status()
 
@@ -350,7 +363,7 @@ class ChessGUI:
             self.status_text = f"{turn} to move"
 
     def is_ai_turn(self):
-        if self.ai_vs_ai:
+        if self.ai_vs_ai or self.vs_stockfish:
             return True
         if self.ai_is_black:
             return self.board.turn == chess.BLACK
@@ -460,6 +473,44 @@ class ChessGUI:
                                     if m.from_square == sq}
         return False
 
+    # --- SF color selection screen ---
+
+    def draw_sf_color_screen(self):
+        self.screen.fill((40, 40, 40))
+        cx = WIN_W // 2
+        s = self.title_font.render("Chessformer", True, TEXT_COLOR)
+        self.screen.blit(s, s.get_rect(center=(cx, 120)))
+        s = self.status_font.render("Model vs Stockfish — choose model's color", True, TEXT_COLOR)
+        self.screen.blit(s, s.get_rect(center=(cx, 220)))
+        mouse = pygame.mouse.get_pos()
+        for btn, label in [(self.sf_white_btn, "White"), (self.sf_black_btn, "Black")]:
+            color = BTN_HOVER if btn.collidepoint(mouse) else BTN_COLOR
+            pygame.draw.rect(self.screen, color, btn, border_radius=8)
+            s = self.btn_font.render(label, True, BTN_TEXT)
+            self.screen.blit(s, s.get_rect(center=btn.center))
+        self.draw_status()
+
+    # --- Stockfish move ---
+
+    def stockfish_move(self, who: str = "Stockfish"):
+        if self.game_over or self.sf_engine is None:
+            return
+        result    = self.sf_engine.play(self.board, chess.engine.Limit(depth=15))
+        move      = result.move
+        was_white = (self.board.turn == chess.WHITE)
+        quality   = self._eval_move(self.board, move)
+        self.board.push(move)
+        self.move_quality.append((quality, was_white))
+        self.made_moves.append(move.uci())
+        self.last_move = move
+        cp_loss = round((1.0 - quality) * 200)
+        if cp_loss <= 10:    label = "Excellent (!)"
+        elif cp_loss <= 25:  label = "Good"
+        elif cp_loss <= 50:  label = "Inaccuracy (?!)"
+        elif cp_loss <= 100: label = "Mistake (?)"
+        else:                label = "Blunder (??)"
+        self.move_log.append((who, cp_loss, label))
+
     # --- Summary overlay ---
 
     def draw_summary_screen(self):
@@ -542,7 +593,22 @@ class ChessGUI:
                 if event.type == pygame.QUIT:
                     running = False
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
-                    if not self.game_started:
+                    if self.sf_color_screen:
+                        if self.sf_white_btn.collidepoint(event.pos):
+                            self.model_is_white  = True
+                            self.vs_stockfish    = True
+                            self.sf_color_screen = False
+                            self.game_started    = True
+                            self.update_status()
+                            self.next_ai_move_at = pygame.time.get_ticks()
+                        elif self.sf_black_btn.collidepoint(event.pos):
+                            self.model_is_white  = False
+                            self.vs_stockfish    = True
+                            self.sf_color_screen = False
+                            self.game_started    = True
+                            self.update_status()
+                            self.next_ai_move_at = pygame.time.get_ticks()
+                    elif not self.game_started:
                         if self.white_btn.collidepoint(event.pos):
                             self.ai_is_black  = True
                             self.flipped      = False
@@ -559,17 +625,22 @@ class ChessGUI:
                             self.game_started = True
                             self.update_status()
                             self.next_ai_move_at = pygame.time.get_ticks()
+                        elif self.vs_sf_btn.collidepoint(event.pos) and self.sf_engine:
+                            self.sf_color_screen = True
+                            self.status_text     = "Choose model's color"
                     else:
                         if self.handle_click(event.pos):
                             self.update_status()
                             if not self.game_over and self.is_ai_turn():
                                 need_ai_move = True
 
-            if not self.game_started:
+            if self.sf_color_screen:
+                self.draw_sf_color_screen()
+            elif not self.game_started:
                 self.draw_start_screen()
             else:
                 # Human vs AI: trigger move via flag
-                if need_ai_move and not self.ai_vs_ai:
+                if need_ai_move and not self.ai_vs_ai and not self.vs_stockfish:
                     self.status_text = "AI is thinking..."
                     self.draw_quality_bar()
                     self.draw_board()
@@ -590,6 +661,24 @@ class ChessGUI:
                         self.draw_status()
                         pygame.display.flip()
                         self.ai_move(who)
+                        self.update_status()
+                        self.next_ai_move_at = pygame.time.get_ticks() + int(self.ai_vs_ai_delay * 1000)
+
+                # Model vs Stockfish: timer-driven
+                if self.vs_stockfish and not self.game_over:
+                    now = pygame.time.get_ticks()
+                    if now >= self.next_ai_move_at:
+                        model_turn = (self.board.turn == chess.WHITE) == self.model_is_white
+                        self.draw_quality_bar()
+                        self.draw_board()
+                        self.draw_status()
+                        pygame.display.flip()
+                        if model_turn:
+                            self.status_text = "Model is thinking..."
+                            self.ai_move("Model")
+                        else:
+                            self.status_text = "Stockfish is thinking..."
+                            self.stockfish_move("Stockfish")
                         self.update_status()
                         self.next_ai_move_at = pygame.time.get_ticks() + int(self.ai_vs_ai_delay * 1000)
 

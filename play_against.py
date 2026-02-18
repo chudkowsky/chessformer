@@ -149,6 +149,19 @@ def ai_make_move(who: str):
     return move, cp_loss, label
 
 
+def sf_make_move(who: str):
+    """Have Stockfish play the current position, push the move, log the rating."""
+    result = sf_engine.play(board, chess.engine.Limit(depth=15))
+    move = result.move
+    board_before = board.copy()
+    board.push(move)
+    made_moves.append(move.uci())
+    cp_loss, label = rate_move_sf(board_before, move)
+    if label:
+        move_log.append((who, cp_loss, label))
+    return move, cp_loss, label
+
+
 def get_player_move():
     while True:
         move_input = input("Your move (in SAN or UCI format): ")
@@ -174,11 +187,14 @@ def get_player_move():
 # ── mode selection ───────────────────────────────────────────────────────────
 print("\n1. Human vs AI")
 print("2. AI vs AI")
+if sf_engine:
+    print("3. Model vs Stockfish")
+_valid = ("1", "2", "3") if sf_engine else ("1", "2")
 while True:
     mode = input("Select mode: ").strip()
-    if mode in ("1", "2"):
+    if mode in _valid:
         break
-    print("Please enter 1 or 2.")
+    print(f"Please enter {' or '.join(_valid)}.")
 
 # ── AI vs AI ─────────────────────────────────────────────────────────────────
 if mode == "2":
@@ -191,6 +207,41 @@ if mode == "2":
             count += 1
             who  = "White" if board.turn == chess.WHITE else "Black"
             move, cp_loss, label = ai_make_move(who)
+            rating_str = f"  →  {label} (cp loss: {cp_loss})" if label else ""
+            print(board)
+            print(f"Move {count} ({who}): {move}{rating_str}")
+            print("\nMove history:", made_moves)
+            if delay > 0 and not is_over():
+                time.sleep(delay)
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        print_summary()
+        if sf_engine:
+            sf_engine.quit()
+
+# ── Model vs Stockfish ───────────────────────────────────────────────────────
+elif mode == "3":
+    while True:
+        model_color = input("Model plays as (w)hite or (b)lack? ").lower()
+        if model_color in ("w", "b"):
+            break
+        print("Please enter 'w' or 'b'.")
+    model_is_white = (model_color == "w")
+
+    delay_str = input("Delay between moves in seconds (default 1): ").strip()
+    delay = float(delay_str) if delay_str else 1.0
+
+    count = 0
+    try:
+        while not is_over():
+            count += 1
+            if (board.turn == chess.WHITE) == model_is_white:
+                move, cp_loss, label = ai_make_move("Model")
+                who = "Model"
+            else:
+                move, cp_loss, label = sf_make_move("Stockfish")
+                who = "Stockfish"
             rating_str = f"  →  {label} (cp loss: {cp_loss})" if label else ""
             print(board)
             print(f"Move {count} ({who}): {move}{rating_str}")
