@@ -7,6 +7,8 @@ import tarfile
 import torch
 import pygame
 import sys
+import chessformer
+sys.modules['transformer'] = chessformer
 from inference_test import preprocess, postprocess_valid
 from copy import deepcopy
 
@@ -40,11 +42,18 @@ PIECE_UNICODE = {
     'r': '\u265c', 'n': '\u265e', 'b': '\u265d', 'q': '\u265b', 'k': '\u265a', 'p': '\u265f',
 }
 
-# --- Device setup ---
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
+# --- Device setup (--device flag to override auto-detection) ---
+import argparse
+_parser = argparse.ArgumentParser()
+_parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'])
+_args = _parser.parse_args()
+
+if _args.device != 'auto':
+    device = torch.device(_args.device)
 elif torch.cuda.is_available():
     device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
 else:
     device = torch.device("cpu")
 
@@ -104,7 +113,7 @@ def print_summary(move_log):
 
 
 def _quality_color(q: float):
-    """Map q ∈ [0,1] → RGB: 0=red, 0.5=yellow, 1=green."""
+    """Map q in [0,1] to RGB: 0=red, 0.5=yellow, 1=green."""
     r = int(220 * (1.0 - q))
     g = int(200 * q)
     return (r, g, 30)
@@ -154,7 +163,7 @@ class ChessGUI:
         self.status_text     = "Select a model"
         self.summary_done    = False
 
-        # Move quality history: list of (q ∈ [0,1], is_white_move)
+        # Move quality history: list of (q in [0,1], is_white_move)
         self.move_quality = []
         # Stockfish move log: list of (who, cp_loss, label)
         self.move_log = []
@@ -209,7 +218,7 @@ class ChessGUI:
     # --- Move quality ---
 
     def _eval_move(self, board_before: chess.Board, move: chess.Move) -> float:
-        """Rate a move using Stockfish. Returns q ∈ [0, 1] (1=excellent, 0=blunder)."""
+        """Rate a move using Stockfish. Returns q in [0, 1] (1=excellent, 0=blunder)."""
         if self.sf_engine is None:
             return 0.5
         info_before = self.sf_engine.analyse(board_before, chess.engine.Limit(depth=12))
@@ -287,7 +296,7 @@ class ChessGUI:
             self.screen.blit(s, (BAR_W + 2, i * SQ_SIZE + 2))
 
     def draw_quality_bar(self):
-        """Left panel: per-move progress bar (0→1) with numerical value."""
+        """Left panel: per-move progress bar (0->1) with numerical value."""
         pygame.draw.rect(self.screen, BAR_BG, (0, 0, BAR_W, BOARD_SIZE))
 
         hdr = self.label_font.render("quality", True, (120, 120, 120))

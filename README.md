@@ -9,8 +9,8 @@ The model learns to score board positions and select legal moves without any sea
 
 ### Model architecture (`chessformer.py`)
 
-The board is represented as a flat sequence of **64 tokens**, one per square (a1→h8),
-where each token is a piece-type index (0 = empty, 1–6 = white pieces, 7–12 = black pieces).
+The board is represented as a flat sequence of **64 tokens**, one per square (a1->h8),
+where each token is a piece-type index (0 = empty, 1-6 = white pieces, 7-12 = black pieces).
 
 The board is always shown from the **moving side's perspective** — when it is Black's turn
 the board string is flipped and piece colours are swapped before encoding, so the model
@@ -22,10 +22,10 @@ Three embeddings are summed per square:
 - **Rank (y) embedding** — 8-class lookup
 
 The combined embedding is passed through a **12-layer Transformer encoder** (8 heads,
-FFN dim 1024, dropout 0.1).
+FFN dim 1024, dropout 0.1, `batch_first=True` for Flash Attention compatibility).
 
 The output is a `[batch, 64, 2]` tensor. The two output values per square are treated as
-a **(from_score, to_score)** pair. The move `i → j` is ranked by `from_score[i] + to_score[j]`.
+a **(from_score, to_score)** pair. The move `i -> j` is ranked by `from_score[i] + to_score[j]`.
 All legal moves are enumerated and the highest-ranked legal move is played.
 
 Two post-processing rules are applied at inference:
@@ -45,10 +45,11 @@ Two post-processing rules are applied at inference:
 | FFN dim | 1024 |
 | Dropout | 0.1 |
 | Loss | CrossEntropyLoss |
-| Batch size | 128 |
+| Batch size | 512 |
 | Dataset | ~1 million positions, ELO 2000 filter |
-| Optimiser | Adam with LR scheduling (γ = 0.9) |
+| Optimiser | AdamW with LR scheduling (gamma = 0.9) |
 | Gradient clipping | 0.1 |
+| Mixed precision | AMP (autocast + GradScaler, CUDA only) |
 
 Training data comes from Lichess PGN dumps, filtered to games where both players are
 rated ~2000. Positions are stored with the board from the moving player's POV.
@@ -89,7 +90,7 @@ python-chess==1.999
 pygame
 ```
 
-GPU acceleration is used automatically when available (CUDA → MPS → CPU fallback).
+GPU acceleration is used automatically when available (CUDA -> MPS -> CPU fallback).
 
 ### Optional: Stockfish
 
@@ -108,6 +109,8 @@ Without it the game still works — move rating is simply disabled.
 
 ```bash
 python play_gui.py
+python play_gui.py --device cpu    # force CPU
+python play_gui.py --device mps    # force Apple Silicon GPU
 ```
 
 **Startup flow:**
@@ -157,6 +160,86 @@ A summary table is printed at the end (or on Ctrl+C).
 
 ---
 
+## Training from scratch
+
+### 1. Get training data from Lichess
+
+Lichess publishes monthly game databases: https://database.lichess.org/
+
+**Streaming (download + filter in one step, no full PGN saved to disk):**
+
+```bash
+# ~1M positions from ELO 2000+ games (1-2h)
+curl -s https://database.lichess.org/standard/lichess_db_standard_rated_2024-01.pgn.zst \
+  | zstd -d \
+  | python pgn_to_training_data.py /dev/stdin full_datasets/elo_2000_pos.txt 2000 1000000
+```
+
+**Larger dataset (10M positions):**
+
+```bash
+curl -s https://database.lichess.org/standard/lichess_db_standard_rated_2024-01.pgn.zst \
+  | zstd -d \
+  | python pgn_to_training_data.py /dev/stdin full_datasets/elo_2000_pos_10M.txt 2000 10000000
+```
+
+**From a local PGN file:**
+
+```bash
+python pgn_to_training_data.py input.pgn full_datasets/elo_2000_pos.txt 2000 1000000
+```
+
+Arguments: `<pgn_file> <output_file> <min_elo> [max_positions]`
+
+### 2. Run training
+
+```bash
+# AMD GPU (ROCm) — env var enables Flash Attention on RDNA 4
+TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1 python train_model.py 2000
+
+# NVIDIA GPU
+python train_model.py 2000
+
+# Mac Apple Silicon
+python train_model.py 2000 --device mps
+
+# CPU (slow, but works everywhere)
+python train_model.py 2000 --device cpu
+```
+
+The argument `2000` is the ELO filter — the script trains on `full_datasets/elo_2000_pos.txt`.
+
+### 3. Monitor progress
+
+Training prints loss every 10% of each epoch. Expected values:
+- Epoch 1: loss ~2.0 (start)
+- Epoch 10: loss ~1.3 (with 1M positions)
+
+If test loss starts rising while train loss keeps dropping = overfitting, stop training.
+
+GPU monitoring:
+```bash
+watch -n1 rocm-smi    # AMD
+watch -n1 nvidia-smi   # NVIDIA
+```
+
+---
+
+## --device flag
+
+All scripts (`train_model.py`, `play_gui.py`, `inference_test.py`) support `--device`:
+
+| Value | Description |
+|---|---|
+| `auto` (default) | Auto-detect: CUDA/ROCm -> MPS -> CPU |
+| `cuda` | Force GPU (NVIDIA or AMD ROCm) |
+| `mps` | Force Apple Silicon GPU (Mac) |
+| `cpu` | Force CPU |
+
+Note: Mixed precision (AMP) is only available on CUDA/ROCm. On MPS/CPU, training automatically falls back to full precision (float32).
+
+---
+
 ## File reference
 
 | File | Purpose |
@@ -166,9 +249,14 @@ A summary table is printed at the end (or on Ctrl+C).
 | `chess_moves_to_input_data.py` | Board-to-string conversion, perspective flipping, dataset preprocessing |
 | `chess_loader.py` | `ChessDataset` / `get_dataloader` for training |
 | `train_model.py` | Training loop, hyperparameters, checkpoint saving |
+| `pgn_to_training_data.py` | PGN to training data conversion (with ELO filter and position limit) |
 | `inference_test.py` | `preprocess()` and `postprocess_valid()` used by both runners |
 | `play_against.py` | CLI game runner |
 | `play_gui.py` | Pygame GUI game runner |
 | `policy.py` | Auxiliary policy utilities |
 | `models/` | Trained `.pth` weight files |
 | `stockfish/` | Auto-extracted Stockfish binary (created on first run) |
+
+## License
+
+This project is licensed under the [MIT License](https://github.com/ncylich/chessformer/blob/main/LICENSE).

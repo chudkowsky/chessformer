@@ -1,3 +1,7 @@
 .venv
 __pycache__
 stockfish/
+full_datasets/
+file_filter
+models/
+docs/
