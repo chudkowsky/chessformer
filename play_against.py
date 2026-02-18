@@ -14,7 +14,7 @@ elif torch.cuda.is_available():
 else:
     device = torch.device("cpu")
 
-model = torch.load(f'models/{MODEL}').to(device)
+model = torch.load(f'models/{MODEL}', map_location="cpu").to(device)
 
 # Initialize the chess board and move history
 board = chess.Board()
@@ -74,7 +74,7 @@ while not (board.is_checkmate() or board.is_stalemate() or board.is_insufficient
     # avoiding 3-move repetition
     temp_board = deepcopy(board)
     temp_board.push(chess.Move.from_uci(uci_move))
-    if temp_board.can_claim_threefold_repition():
+    if temp_board.can_claim_threefold_repetition():
         uci_move = predict_move(rep_mv=uci_move)
 
     # Prioritize checkmate move if available

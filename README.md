@@ -18,7 +18,7 @@ ChessFormer uses extensive datasets from [lichess](https://lichess.org/), a popu
 
 ## Setup and Requirements
 
-Before running the scripts, ensure you have Python 3.x and a C++ compiler installed. Follow these steps:
+Before running the scripts, ensure you have Python 3.11 and a C++ compiler installed. Torch 2.1.2 wheels are only available for specific Python versions. Follow these steps:
 
 1. Clone the ChessFormer repository:
 

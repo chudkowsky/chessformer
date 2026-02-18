@@ -26,8 +26,8 @@ def parse_pos_lists(list_file, num_pos=None):
             continue
 
         board, new_move = line.strip().split()
-        piece_to_index = {'.': 1, 'P': 2, 'N': 3, 'B': 4, 'R': 5, 'Q': 6, 'K': 7,
-                          'p': 8, 'n': 9, 'b': 10, 'r': 11, 'q': 12, 'k': 13}
+        piece_to_index = {'.': 0, 'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,
+                  'p': 7, 'n': 8, 'b': 9, 'r': 10, 'q': 11, 'k': 12}
         board = [piece_to_index[p] for p in board]  # Convert pieces to integers
 
         new_move = new_move[:2], new_move[2:]  # Split move into start and end squares

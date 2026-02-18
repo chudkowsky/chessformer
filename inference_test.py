@@ -18,7 +18,7 @@ elif torch.cuda.is_available():
 else:
     device = torch.device("cpu")
 
-model = torch.load(f'models/{MODEL}').to(device)
+model = torch.load(f'models/{MODEL}', map_location="cpu").to(device)
 
 # Preprocessing function
 def preprocess(board):
@@ -26,8 +26,8 @@ def preprocess(board):
     Converts a chess board state to a tensor representation.
     """
     board_str = get_board_str(board, white_side=board.turn)
-    piece_to_index = {'.': 1, 'P': 2, 'N': 3, 'B': 4, 'R': 5, 'Q': 6, 'K': 7,
-                      'p': 8, 'n': 9, 'b': 10, 'r': 11, 'q': 12, 'k': 13}
+    piece_to_index = {'.': 0, 'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,
+                      'p': 7, 'n': 8, 'b': 9, 'r': 10, 'q': 11, 'k': 12}
     board_pieces = [piece_to_index[p] for p in board_str]
     return torch.tensor([board_pieces], dtype=torch.long).to(device)
 
