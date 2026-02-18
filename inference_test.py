@@ -1,6 +1,9 @@
 import torch
 import chess
+import sys
 from chess_loader import ChessDataset
+import chessformer
+sys.modules['transformer'] = chessformer
 from chessformer import ChessTransformer
 from chess_moves_to_input_data import get_board_str, switch_player, switch_move
 from torch.utils.data import DataLoader
@@ -8,17 +11,24 @@ from copy import deepcopy
 import time
 
 # Configuration
-MODEL = "2000_elo_pos_engine_best_test_whole.pth"
+MODEL = "2000_elo_pos_engine.pth"
 
-# Model and device setup
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
+# Changed: --device flag to override auto-detection (auto/cuda/mps/cpu)
+import argparse
+_parser = argparse.ArgumentParser()
+_parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'])
+_args = _parser.parse_args()
+
+if _args.device != 'auto':
+    device = torch.device(_args.device)
 elif torch.cuda.is_available():
     device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
 else:
     device = torch.device("cpu")
 
-model = torch.load(f'models/{MODEL}', map_location="cpu").to(device)
+model = torch.load(f'models/{MODEL}', weights_only=False, map_location=device).to(device)
 
 # Preprocessing function
 def preprocess(board):

@@ -3,7 +3,7 @@ from chessformer import ChessTransformer
 from chess_loader import get_dataloader
 import torch
 import torch.nn as nn
-from torch.cuda.amp import GradScaler, autocast
+from torch.amp import GradScaler, autocast
 import time
 from datetime import timedelta
 
@@ -20,7 +20,8 @@ num_epochs = 10
 INCREMENTS = num_epochs
 GAMMA = .9
 SCALE = 1
-batch_size = int(128 / SCALE)
+# Changed: 128→512 to better utilize GPU VRAM (33% → ~80%) and reduce batches per epoch
+batch_size = int(512 / SCALE)
 LR = {.5: 5e-4, 1: 1e-4, 2: 1e-5}
 LR = LR[SCALE] if SCALE in LR else 1e-5
 CLIP = .1
@@ -33,10 +34,10 @@ out_ntoken = 2
 start_time = time.time()
 
 # Check for GPU availability
-if torch.backends.mps.is_available():
-    device = torch.device("mps")
-elif torch.cuda.is_available():
+if torch.cuda.is_available():
     device = torch.device("cuda")
+elif torch.backends.mps.is_available():
+    device = torch.device("mps")
 else:
     device = torch.device("cpu")
 
@@ -54,15 +55,21 @@ def train(model: str = ""):
     else:
         model = ChessTransformer(inp_ntoken, out_ntoken, d_model, nhead, d_hid, nlayers, dropout=dropout).to(device)
 
-    print(f'Creating New Model: {END_MODEL}_best_whole.pth\nDataset: {DATASET}\n')
+    num_params = sum(p.numel() for p in model.parameters())
+    print(f'Creating New Model: {END_MODEL}_best_whole.pth\nDataset: {DATASET}')
+    print(f'Parameters: {num_params:,} | Device: {device}\n')
 
     # Loss Function and Optimizer setup
     loss_fn = nn.CrossEntropyLoss()
     optimizer = torch.optim.AdamW(model.parameters(), lr=LR)
     scheduler = torch.optim.lr_scheduler.StepLR(optimizer, step_size=int(num_epochs / INCREMENTS), gamma=GAMMA)
+    # Changed: AMP (mixed precision) only on CUDA - not supported on MPS/CPU
+    use_amp = device.type == "cuda"
+    scaler = GradScaler("cuda") if use_amp else None
 
     # Data loaders for training and testing
-    dataloader, testloader = get_dataloader(DATASET, batch_size=batch_size, num_workers=0, num_pos=NUM_POS)
+    # Changed: num_workers=4 for parallel data loading (separate processes, no data race)
+    dataloader, testloader = get_dataloader(DATASET, batch_size=batch_size, num_workers=4, num_pos=NUM_POS)
 
     # Training loop
     best_loss = None
@@ -72,25 +79,45 @@ def train(model: str = ""):
         total_loss = 0
         for batch, (boards, target) in enumerate(dataloader):
             boards, target = boards.to(device), target.to(device)
-            output = model(boards)
-            loss = loss_fn(output, target)
-            optimizer.zero_grad()
-            loss.backward()
-            if CLIP:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
-            optimizer.step()
+            # Changed: mixed precision - forward pass in float16 for ~2x speedup (CUDA only)
+            if use_amp:
+                with autocast("cuda"):
+                    output = model(boards)
+                    loss = loss_fn(output, target)
+                optimizer.zero_grad()
+                scaler.scale(loss).backward()
+                if CLIP:
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                output = model(boards)
+                loss = loss_fn(output, target)
+                optimizer.zero_grad()
+                loss.backward()
+                if CLIP:
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
+                optimizer.step()
             total_loss += loss.item()
 
             # Progress output
-            if (batch + 1) % (len(dataloader) // 10) == 0:
-                elapsed = str(timedelta(seconds=time.time() - start_time))
+            log_interval = max(1, len(dataloader) // 10)
+            if (batch + 1) % log_interval == 0:
+                avg_loss = total_loss / (batch + 1)
+                elapsed = str(timedelta(seconds=int(time.time() - start_time)))
                 print(
-                    f'Epoch {epoch}: Batch {batch + 1} / {len(dataloader)} = {100 * (batch + 1) / len(dataloader):.{0}f}%')
-                print("Elapsed Time: ", elapsed)
+                    f'Epoch {epoch}: Batch {batch + 1}/{len(dataloader)} '
+                    f'({100 * (batch + 1) / len(dataloader):.0f}%) '
+                    f'| Loss: {avg_loss:.4f} | {elapsed}')
 
         scheduler.step()
+        avg_train_loss = total_loss / len(dataloader)
+        if best_loss is None or avg_train_loss < best_loss:
+            best_loss = avg_train_loss
 
         # Evaluation on test dataset
+        model.eval()
         tot_test_loss = 0
         with torch.no_grad():
             for batch in testloader:
@@ -99,17 +126,33 @@ def train(model: str = ""):
                 loss = loss_fn(output, target)
                 tot_test_loss += loss.item()
 
+        avg_test_loss = tot_test_loss / len(testloader)
+        print(f'Epoch {epoch} done | Train loss: {avg_train_loss:.4f} | Test loss: {avg_test_loss:.4f}')
+
         # Save the best model
         if best_test_loss is None or tot_test_loss < best_test_loss:
             best_test_loss = tot_test_loss
             if epoch >= min(num_epochs - 2, 3):
                 torch.save(model, f'models/{END_MODEL}.pth')
+                print(f'  -> Saved model (best test loss)')
 
-    print(f'Best Training Loss: {best_loss / len(dataloader)}')
-    print(f'Best Testing Loss: {best_test_loss / len(testloader)}')
+    print(f'\nBest Training Loss: {best_loss:.4f}')
+    print(f'Best Testing Loss: {best_test_loss / len(testloader):.4f}')
 
 
 if __name__ == '__main__':
+    import sys
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('elo', nargs='?', type=int, default=elo, help='ELO rating filter')
+    # Changed: --device flag to override auto-detection (auto/cuda/mps/cpu)
+    parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'],
+                        help='Device to train on (default: auto-detect)')
+    args = parser.parse_args()
+    elo = args.elo
+    max_elo = elo
+    if args.device != 'auto':
+        device = torch.device(args.device)
     if single_run:
         elo = max_elo
     new_model = True
