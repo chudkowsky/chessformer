@@ -136,7 +136,25 @@ def _quality_color(q: float):
 
 
 def _load_model(path):
-    m = torch.load(path, weights_only=False, map_location="cpu").to(device)
+    obj = torch.load(path, weights_only=False, map_location="cpu")
+    if isinstance(obj, dict):
+        # RL checkpoint (ppo.py saves ChessformerPolicyWrapper.state_dict())
+        # Keys are prefixed with "adapter.transformer."
+        prefix = "adapter.transformer."
+        sd = {k[len(prefix):]: v for k, v in obj.items() if k.startswith(prefix)}
+        if not sd:
+            raise ValueError(f"Unrecognised checkpoint format in {path}")
+        inp_dict  = sd['embedding.weight'].shape[0]
+        out_dict  = sd['linear_output.weight'].shape[0]
+        d_model   = sd['embedding.weight'].shape[1]
+        d_hid     = sd['transformer_encoder.layers.0.linear1.weight'].shape[0]
+        nlayers   = sum(1 for k in sd if k.endswith('.self_attn.in_proj_weight'))
+        nhead     = max(1, d_model // 64)
+        m = chessformer.ChessTransformer(inp_dict, out_dict, d_model, nhead, d_hid, nlayers, dropout=0.0)
+        m.load_state_dict(sd)
+    else:
+        m = obj
+    m = m.to(device)
     m.eval()
     return m
 
