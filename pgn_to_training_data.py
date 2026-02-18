@@ -1,10 +1,13 @@
-"""Parse a lichess PGN file and produce training data for ChessFormer.
+"""Parse a PGN file and produce training data for ChessFormer.
 
 Output format (one line per position):
     <64-char board string> <uci_move>
 
-Only games where both players have Elo >= MIN_ELO are included.
-Blitz and Bullet games are skipped.
+For Lichess games: only games where both players have Elo >= MIN_ELO are
+included, and Blitz/Bullet games are skipped.
+
+For self-play games (Event header starts with "SF-SelfPlay"): all games are
+included regardless of Elo or time control.
 """
 
 import chess
@@ -34,26 +37,29 @@ def process_pgn(pgn_path, out_path, min_elo=MIN_ELO, max_positions=None):
             if game is None:
                 break
 
-            # Filter by Elo
-            try:
-                white_elo = int(game.headers.get("WhiteElo", "0"))
-                black_elo = int(game.headers.get("BlackElo", "0"))
-            except ValueError:
-                games_skipped += 1
-                continue
-
-            if white_elo < min_elo or black_elo < min_elo:
-                games_skipped += 1
-                if games_skipped % 50000 == 0:
-                    total = games_used + games_skipped
-                    print(f"Scanned {total} games, used: {games_used}, positions: {positions_written}")
-                continue
-
-            # Skip Blitz/Bullet
             event = game.headers.get("Event", "")
-            if "Blitz" in event or "Bullet" in event:
-                games_skipped += 1
-                continue
+            is_selfplay = event.startswith("SF-SelfPlay")
+
+            if not is_selfplay:
+                # Filter by Elo
+                try:
+                    white_elo = int(game.headers.get("WhiteElo", "0"))
+                    black_elo = int(game.headers.get("BlackElo", "0"))
+                except ValueError:
+                    games_skipped += 1
+                    continue
+
+                if white_elo < min_elo or black_elo < min_elo:
+                    games_skipped += 1
+                    if games_skipped % 50000 == 0:
+                        total = games_used + games_skipped
+                        print(f"Scanned {total} games, used: {games_used}, positions: {positions_written}")
+                    continue
+
+                # Skip Blitz/Bullet
+                if "Blitz" in event or "Bullet" in event:
+                    games_skipped += 1
+                    continue
 
             # Process moves
             board = game.board()
