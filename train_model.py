@@ -148,16 +148,26 @@ if __name__ == '__main__':
     # Changed: --device flag to override auto-detection (auto/cuda/mps/cpu)
     parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'],
                         help='Device to train on (default: auto-detect)')
+    # Changed: --dataset flag to override default dataset path
+    parser.add_argument('--dataset', type=str, default=None,
+                        help='Path to dataset file (default: full_datasets/elo_{elo}_pos.txt)')
+    # Changed: --num-pos flag to override NUM_POS
+    parser.add_argument('--num-pos', type=float, default=NUM_POS,
+                        help=f'Number of positions to load (default: {NUM_POS:.0f})')
     args = parser.parse_args()
     elo = args.elo
     max_elo = elo
+    NUM_POS = args.num_pos
     if args.device != 'auto':
         device = torch.device(args.device)
     if single_run:
         elo = max_elo
     new_model = True
     for i in range(elo, max_elo + 1, 200):
-        DATASET = f"full_datasets/elo_{i}_pos.txt" if FULL_SET else f"sub_datasets/elo_{i}_pos.txt"
+        if args.dataset:
+            DATASET = args.dataset
+        else:
+            DATASET = f"full_datasets/elo_{i}_pos.txt" if FULL_SET else f"sub_datasets/elo_{i}_pos.txt"
         START_MODEL = f'{i - 200}_elo_pos_engine_best_whole.pth' if not new_model else ""
         END_MODEL = f'{i}_elo_pos_engine'
         train(model=START_MODEL)
