@@ -4,6 +4,7 @@ import glob
 import math
 import os
 import tarfile
+import time
 import torch
 from inference_test import preprocess, postprocess_valid
 from copy import deepcopy
@@ -78,10 +79,11 @@ move_log = []
 def print_summary():
     if not move_log:
         return
+    players = list(dict.fromkeys(w for w, _, _ in move_log))  # unique, insertion order
     print("\n" + "=" * 44)
     print("           GAME SUMMARY")
     print("=" * 44)
-    for who in ["You", "AI"]:
+    for who in players:
         moves = [(cp, lbl) for (w, cp, lbl) in move_log if w == who]
         if not moves:
             continue
@@ -101,12 +103,53 @@ def print_summary():
     print("=" * 44)
 
 
-# Initialize the chess board and move history
-board = chess.Board()
+# ── shared state ────────────────────────────────────────────────────────────
+board      = chess.Board()
 made_moves = []
+move_log   = []
 
-# Function to handle player's move input
-def get_player_move(board):
+
+def is_over():
+    return (board.is_checkmate() or board.is_stalemate()
+            or board.is_insufficient_material() or board.can_claim_draw())
+
+
+def ai_make_move(who: str):
+    """Run the model for the current position, push the move, log the rating."""
+    input_tensors = preprocess(board)
+
+    def predict(rep_mv=""):
+        with torch.no_grad():
+            output = model(input_tensors)
+        return postprocess_valid(output, board, rep_mv=rep_mv)
+
+    uci_move = predict()
+
+    # Avoid 3-move repetition
+    tmp = deepcopy(board)
+    tmp.push(chess.Move.from_uci(uci_move))
+    if tmp.can_claim_threefold_repetition():
+        uci_move = predict(rep_mv=uci_move)
+
+    # Prioritize checkmate
+    for m in board.legal_moves:
+        tmp = deepcopy(board)
+        tmp.push(m)
+        if tmp.is_checkmate():
+            uci_move = m.uci()
+            break
+
+    move        = chess.Move.from_uci(uci_move)
+    board_before = board.copy()
+    board.push(move)
+    made_moves.append(move.uci())
+    cp_loss, label = rate_move_sf(board_before, move)
+    if label:
+        move_log.append((who, cp_loss, label))
+    return move, cp_loss, label
+
+
+def get_player_move():
     while True:
         move_input = input("Your move (in SAN or UCI format): ")
         try:
@@ -117,7 +160,6 @@ def get_player_move(board):
             except (chess.InvalidMoveError, chess.IllegalMoveError):
                 print("Invalid move. Please try again.")
                 continue
-
         if move in board.legal_moves:
             board_before = board.copy()
             board.push(move)
@@ -128,74 +170,67 @@ def get_player_move(board):
                 print(f"Your move rating: {label} (cp loss: {cp_loss})")
             break
 
-    return board
 
-# Game Loop
-while not (board.is_checkmate() or board.is_stalemate() or board.is_insufficient_material() or board.can_claim_draw()):
-    print(board)
-    print("\nMove history:", made_moves)
-
-    # Determining who the AI is playing as
-    ai_player = input("Is the AI playing as white (w) or black (b)? ").lower()
-    if ai_player in ['b', 'w']:
-        ai_player = ai_player == 'b'
+# ── mode selection ───────────────────────────────────────────────────────────
+print("\n1. Human vs AI")
+print("2. AI vs AI")
+while True:
+    mode = input("Select mode: ").strip()
+    if mode in ("1", "2"):
         break
+    print("Please enter 1 or 2.")
 
-    print("Invalid choice. Please enter 'w' for white or 'b' for black.")
+# ── AI vs AI ─────────────────────────────────────────────────────────────────
+if mode == "2":
+    delay_str = input("Delay between moves in seconds (default 1): ").strip()
+    delay = float(delay_str) if delay_str else 1.0
 
-# Play as human if AI is set to play as black
-if ai_player:
-    board = get_player_move(board)
+    count = 0
+    try:
+        while not is_over():
+            count += 1
+            who  = "White" if board.turn == chess.WHITE else "Black"
+            move, cp_loss, label = ai_make_move(who)
+            rating_str = f"  →  {label} (cp loss: {cp_loss})" if label else ""
+            print(board)
+            print(f"Move {count} ({who}): {move}{rating_str}")
+            print("\nMove history:", made_moves)
+            if delay > 0 and not is_over():
+                time.sleep(delay)
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        print_summary()
+        if sf_engine:
+            sf_engine.quit()
 
-count = 0
-try:
-    while not (board.is_checkmate() or board.is_stalemate() or board.is_insufficient_material() or board.can_claim_draw()):
-        # AI's turn
-        input_tensors = preprocess(board)
-        count += 1
+# ── Human vs AI ──────────────────────────────────────────────────────────────
+else:
+    print(board)
+    while True:
+        ai_color = input("Is the AI playing as white (w) or black (b)? ").lower()
+        if ai_color in ("w", "b"):
+            break
+        print("Please enter 'w' or 'b'.")
+    ai_is_black = (ai_color == "b")
 
-        def predict_move(rep_mv=""):
-            with torch.no_grad():
-                output = model(input_tensors)
-            uci_mv = postprocess_valid(output, board, rep_mv=rep_mv)
-            return uci_mv
+    if ai_is_black:
+        get_player_move()
 
-        uci_move = predict_move()
-
-        # avoiding 3-move repetition
-        temp_board = deepcopy(board)
-        temp_board.push(chess.Move.from_uci(uci_move))
-        if temp_board.can_claim_threefold_repetition():
-            uci_move = predict_move(rep_mv=uci_move)
-
-        # Prioritize checkmate move if available
-        for move in board.legal_moves:
-            temp_board = deepcopy(board)
-            temp_board.push(move)
-            if temp_board.is_checkmate():
-                uci_move = move.uci()
-                break
-
-        # Execute AI's move
-        move = chess.Move.from_uci(uci_move)
-        board_before_ai = board.copy()
-        board.push(move)
-        made_moves.append(move.uci())
-        cp_loss, label = rate_move_sf(board_before_ai, move)
-        if label:
-            move_log.append(("AI", cp_loss, label))
-
-        # Display board and move history
-        print(board)
-        rating_str = f"  →  {label} (cp loss: {cp_loss})" if label else ""
-        print(f"Predicted move {count}: {move}{rating_str}")
-        print("\nMove history:", made_moves)
-
-        if not (board.is_checkmate() or board.is_stalemate() or board.is_insufficient_material() or board.can_claim_draw()):
-            board = get_player_move(board)
-except (KeyboardInterrupt, EOFError):
-    pass
-finally:
-    print_summary()
-    if sf_engine:
-        sf_engine.quit()
+    count = 0
+    try:
+        while not is_over():
+            count += 1
+            move, cp_loss, label = ai_make_move("AI")
+            rating_str = f"  →  {label} (cp loss: {cp_loss})" if label else ""
+            print(board)
+            print(f"Predicted move {count}: {move}{rating_str}")
+            print("\nMove history:", made_moves)
+            if not is_over():
+                get_player_move()
+    except (KeyboardInterrupt, EOFError):
+        pass
+    finally:
+        print_summary()
+        if sf_engine:
+            sf_engine.quit()

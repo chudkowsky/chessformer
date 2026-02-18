@@ -1,6 +1,7 @@
 import chess
 import chess.engine
 import glob
+import math
 import os
 import tarfile
 import torch
@@ -71,6 +72,38 @@ except FileNotFoundError:
     _sf_engine = None
     print("Stockfish not found at that path. Move rating disabled.")
 
+_delay_str = input("AI vs AI delay in seconds (default 1): ").strip()
+_ai_vs_ai_delay = float(_delay_str) if _delay_str else 1.0
+
+LABELS = ["Excellent (!)", "Good", "Inaccuracy (?!)", "Mistake (?)", "Blunder (??)"]
+
+
+def print_summary(move_log):
+    if not move_log:
+        return
+    players = list(dict.fromkeys(w for w, _, _ in move_log))
+    print("\n" + "=" * 44)
+    print("           GAME SUMMARY")
+    print("=" * 44)
+    for who in players:
+        moves = [(cp, lbl) for (w, cp, lbl) in move_log if w == who]
+        if not moves:
+            continue
+        counts = {lbl: 0 for lbl in LABELS}
+        for cp, lbl in moves:
+            counts[lbl] += 1
+        avg_cp = sum(cp for cp, _ in moves) / len(moves)
+        accuracy = max(0.0, min(100.0, 100 * math.exp(-avg_cp / 150)))
+        print(f"\n  {who} ({len(moves)} moves)")
+        print(f"  {'Excellent (!)':18s} {counts['Excellent (!)']}")
+        print(f"  {'Good':18s} {counts['Good']}")
+        print(f"  {'Inaccuracy (?!)':18s} {counts['Inaccuracy (?!)']}")
+        print(f"  {'Mistake (?)':18s} {counts['Mistake (?)']}")
+        print(f"  {'Blunder (??)':18s} {counts['Blunder (??)']}")
+        print(f"  {'Avg cp loss':18s} {avg_cp:.1f}")
+        print(f"  {'Accuracy':18s} {accuracy:.1f}%")
+    print("=" * 44)
+
 
 def _quality_color(q: float):
     """Map q ∈ [0,1] → RGB: 0=red, 0.5=yellow, 1=green."""
@@ -95,24 +128,34 @@ class ChessGUI:
         self.title_font  = pygame.font.SysFont("sans", 48, bold=True)
 
         # Game state
-        self.board       = chess.Board()
-        self.made_moves  = []
-        self.selected_sq = None
-        self.legal_dests = set()
-        self.last_move   = None
-        self.flipped     = False
-        self.ai_is_black = True
+        self.board        = chess.Board()
+        self.made_moves   = []
+        self.selected_sq  = None
+        self.legal_dests  = set()
+        self.last_move    = None
+        self.flipped      = False
+        self.ai_is_black  = True
+        self.ai_vs_ai     = False
+        self.ai_vs_ai_delay = _ai_vs_ai_delay
+        self.next_ai_move_at = 0       # pygame ticks for next AI move
         self.game_started = False
         self.game_over    = False
         self.status_text  = "Choose your color"
+        self.summary_done = False
 
         # Move quality history: list of (q ∈ [0,1], is_white_move)
         self.move_quality = []
+        # Stockfish move log: list of (who, cp_loss, label)
+        self.move_log = []
 
-        # Start screen buttons — centered in the full window
-        cx = WIN_W // 2
-        self.white_btn = pygame.Rect(cx - 150, 300, 120, 50)
-        self.black_btn = pygame.Rect(cx + 30,  300, 120, 50)
+        # Start screen buttons — three buttons centred in the window
+        cx  = WIN_W // 2
+        bw, bh, gap = 110, 50, 20
+        total = 3 * bw + 2 * gap
+        x0 = cx - total // 2
+        self.white_btn    = pygame.Rect(x0,            300, bw, bh)
+        self.black_btn    = pygame.Rect(x0 + bw + gap, 300, bw, bh)
+        self.ai_vs_ai_btn = pygame.Rect(x0 + 2*(bw+gap), 300, bw, bh)
 
     def _init_piece_font(self, size):
         for name in ["DejaVu Sans", "Noto Sans Symbols2", "Noto Sans Symbols",
@@ -274,7 +317,8 @@ class ChessGUI:
         s = self.status_font.render("Choose your color", True, TEXT_COLOR)
         self.screen.blit(s, s.get_rect(center=(cx, 220)))
         mouse = pygame.mouse.get_pos()
-        for btn, label in [(self.white_btn, "White"), (self.black_btn, "Black")]:
+        for btn, label in [(self.white_btn, "White"), (self.black_btn, "Black"),
+                           (self.ai_vs_ai_btn, "AI vs AI")]:
             color = BTN_HOVER if btn.collidepoint(mouse) else BTN_COLOR
             pygame.draw.rect(self.screen, color, btn, border_radius=8)
             s = self.btn_font.render(label, True, BTN_TEXT)
@@ -305,11 +349,13 @@ class ChessGUI:
             self.status_text = f"{turn} to move"
 
     def is_ai_turn(self):
+        if self.ai_vs_ai:
+            return True
         if self.ai_is_black:
             return self.board.turn == chess.BLACK
         return self.board.turn == chess.WHITE
 
-    def ai_move(self):
+    def ai_move(self, who: str = "AI"):
         if self.game_over:
             return
         input_tensors = preprocess(self.board)
@@ -343,13 +389,20 @@ class ChessGUI:
                 uci = move.uci()
                 break
 
-        move       = chess.Move.from_uci(uci)
-        was_white  = (self.board.turn == chess.WHITE)
-        quality    = self._eval_move(self.board, move)
+        move      = chess.Move.from_uci(uci)
+        was_white = (self.board.turn == chess.WHITE)
+        quality   = self._eval_move(self.board, move)
         self.board.push(move)
         self.move_quality.append((quality, was_white))
         self.made_moves.append(move.uci())
         self.last_move = move
+        cp_loss = round((1.0 - quality) * 200)
+        if cp_loss <= 10:   label = "Excellent (!)"
+        elif cp_loss <= 25: label = "Good"
+        elif cp_loss <= 50: label = "Inaccuracy (?!)"
+        elif cp_loss <= 100: label = "Mistake (?)"
+        else:               label = "Blunder (??)"
+        self.move_log.append((who, cp_loss, label))
 
     def handle_click(self, pos):
         if self.game_over or self.is_ai_turn():
@@ -377,6 +430,13 @@ class ChessGUI:
                     self.move_quality.append((quality, was_white))
                     self.made_moves.append(move.uci())
                     self.last_move = move
+                    cp_loss = round((1.0 - quality) * 200)
+                    if cp_loss <= 10:    label = "Excellent (!)"
+                    elif cp_loss <= 25:  label = "Good"
+                    elif cp_loss <= 50:  label = "Inaccuracy (?!)"
+                    elif cp_loss <= 100: label = "Mistake (?)"
+                    else:                label = "Blunder (??)"
+                    self.move_log.append(("You", cp_loss, label))
                     self.selected_sq = None
                     self.legal_dests = set()
                     return True
@@ -400,7 +460,7 @@ class ChessGUI:
     # --- Main loop ---
 
     def run(self):
-        running     = True
+        running      = True
         need_ai_move = False
 
         while running:
@@ -420,6 +480,11 @@ class ChessGUI:
                             self.game_started = True
                             self.update_status()
                             need_ai_move = True
+                        elif self.ai_vs_ai_btn.collidepoint(event.pos):
+                            self.ai_vs_ai     = True
+                            self.game_started = True
+                            self.update_status()
+                            self.next_ai_move_at = pygame.time.get_ticks()
                     else:
                         if self.handle_click(event.pos):
                             self.update_status()
@@ -429,15 +494,36 @@ class ChessGUI:
             if not self.game_started:
                 self.draw_start_screen()
             else:
-                if need_ai_move:
+                # Human vs AI: trigger move via flag
+                if need_ai_move and not self.ai_vs_ai:
                     self.status_text = "AI is thinking..."
                     self.draw_quality_bar()
                     self.draw_board()
                     self.draw_status()
                     pygame.display.flip()
-                    self.ai_move()
+                    self.ai_move("AI")
                     self.update_status()
                     need_ai_move = False
+
+                # AI vs AI: timer-driven moves
+                if self.ai_vs_ai and not self.game_over:
+                    now = pygame.time.get_ticks()
+                    if now >= self.next_ai_move_at:
+                        who = "White" if self.board.turn == chess.WHITE else "Black"
+                        self.status_text = f"{who} is thinking..."
+                        self.draw_quality_bar()
+                        self.draw_board()
+                        self.draw_status()
+                        pygame.display.flip()
+                        self.ai_move(who)
+                        self.update_status()
+                        self.next_ai_move_at = pygame.time.get_ticks() + int(self.ai_vs_ai_delay * 1000)
+
+                # Print summary once when game ends
+                if self.game_over and not self.summary_done:
+                    print_summary(self.move_log)
+                    self.summary_done = True
+
                 self.draw_quality_bar()
                 self.draw_board()
                 self.draw_status()
