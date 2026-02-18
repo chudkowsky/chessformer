@@ -41,7 +41,7 @@ PIECE_UNICODE = {
 }
 
 # --- Model setup ---
-MODEL = "2000_elo_pos_engine_3head.pth"
+MODEL = "2000_elo_pos_engine.pth"
 
 if torch.backends.mps.is_available():
     device = torch.device("mps")

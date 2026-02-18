@@ -10,7 +10,7 @@ from inference_test import preprocess, postprocess_valid
 from copy import deepcopy
 
 # Model Configuration
-MODEL = "2000_elo_pos_engine_3head.pth"
+MODEL = "2000_elo_pos_engine.pth"
 
 # Device setup for model
 if torch.backends.mps.is_available():
