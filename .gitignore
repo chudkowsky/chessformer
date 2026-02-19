@@ -8,11 +8,7 @@ docs/
 selfplay_data/
 wheelies/
 chessformer.egg-info/
-train_v2.log
 uv.toml
 artifacts/
-selfplay_data_v2/
 selfplay_mcts/
-selfplay_v2.log
-selfplay_v2_gated.log
 compass_artifact_*
