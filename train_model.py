@@ -40,6 +40,7 @@ d_model = 512
 d_hid = d_model * 2
 nhead = 8
 nlayers = 12
+d_policy = 128
 inp_ntoken = 13
 out_ntoken = 2
 start_time = time.time()
@@ -75,7 +76,7 @@ def train(
         model_path = model if '/' in model else f'models/{model}'
         if model_version == 'v2':
             checkpoint = torch.load(model_path, weights_only=False, map_location=device)
-            m = ChessTransformerV2(d_model=d_model, nhead=nhead, d_hid=d_hid, nlayers=nlayers, dropout=dropout)
+            m = ChessTransformerV2(d_model=d_model, nhead=nhead, d_hid=d_hid, nlayers=nlayers, d_policy=d_policy, dropout=dropout)
             m.load_state_dict(checkpoint['state_dict'])
             model = m.to(device)
         else:
@@ -83,7 +84,7 @@ def train(
         print(f'Resuming from: {model_path}')
     else:
         if model_version == 'v2':
-            model = ChessTransformerV2(d_model=d_model, nhead=nhead, d_hid=d_hid, nlayers=nlayers, dropout=dropout).to(device)
+            model = ChessTransformerV2(d_model=d_model, nhead=nhead, d_hid=d_hid, nlayers=nlayers, d_policy=d_policy, dropout=dropout).to(device)
         else:
             model = ChessTransformer(inp_ntoken, out_ntoken, d_model, nhead, d_hid, nlayers, dropout=dropout).to(device)
 
@@ -117,6 +118,13 @@ def train(
     # Changed: patience tracks epochs without test loss improvement (early stopping)
     no_improve = 0
 
+    def _batch_loss(batch_data):
+        if model_version == 'v2':
+            boards, features, from_sq, to_sq, _promo, wdl_target = [x.to(device) for x in batch_data]
+            return _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target)
+        boards, target = batch_data[0].to(device), batch_data[1].to(device)
+        return _compute_loss_v1(model, boards, target, loss_fn)
+
     # Training loop
     best_loss = None
     best_test_loss = None
@@ -124,16 +132,10 @@ def train(
         model.train()
         total_loss = 0
         for batch, batch_data in enumerate(dataloader):
-            # Changed: mixed precision - forward pass in float16 for ~2x speedup (CUDA only)
+            optimizer.zero_grad()
             if use_amp:
                 with autocast("cuda"):
-                    if model_version == 'v2':
-                        boards, features, from_sq, to_sq, promo, wdl_target = [x.to(device) for x in batch_data]
-                        loss = _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target)
-                    else:
-                        boards, target = batch_data[0].to(device), batch_data[1].to(device)
-                        loss = _compute_loss_v1(model, boards, target, loss_fn)
-                optimizer.zero_grad()
+                    loss = _batch_loss(batch_data)
                 scaler.scale(loss).backward()
                 scaler.unscale_(optimizer)
                 if use_grokfast:
@@ -143,13 +145,7 @@ def train(
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                if model_version == 'v2':
-                    boards, features, from_sq, to_sq, promo, wdl_target = [x.to(device) for x in batch_data]
-                    loss = _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target)
-                else:
-                    boards, target = batch_data[0].to(device), batch_data[1].to(device)
-                    loss = _compute_loss_v1(model, boards, target, loss_fn)
-                optimizer.zero_grad()
+                loss = _batch_loss(batch_data)
                 loss.backward()
                 if use_grokfast:
                     ema_grads = gradfilter_ema(model, ema_grads, grokfast_alpha, grokfast_lamb)
@@ -178,28 +174,22 @@ def train(
         tot_test_loss = 0
         with torch.no_grad():
             for batch_data in testloader:
-                if model_version == 'v2':
-                    boards, features, from_sq, to_sq, promo, wdl_target = [x.to(device) for x in batch_data]
-                    loss = _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target)
-                else:
-                    boards, target = batch_data[0].to(device), batch_data[1].to(device)
-                    loss = _compute_loss_v1(model, boards, target, loss_fn)
-                tot_test_loss += loss.item()
+                tot_test_loss += _batch_loss(batch_data).item()
 
         avg_test_loss = tot_test_loss / len(testloader)
         print(f'Epoch {epoch} done | Train loss: {avg_train_loss:.4f} | Test loss: {avg_test_loss:.4f}')
         tracker.log_epoch(epoch, avg_train_loss, avg_test_loss)
 
         # Save the best model
-        if best_test_loss is None or tot_test_loss < best_test_loss:
-            best_test_loss = tot_test_loss
+        if best_test_loss is None or avg_test_loss < best_test_loss:
+            best_test_loss = avg_test_loss
             no_improve = 0
             if epoch >= min(num_epochs - 2, 3):
                 if model_version == 'v2':
                     torch.save({
                         'version': 'v2',
                         'state_dict': model.state_dict(),
-                        'config': {'d_model': d_model, 'nhead': nhead, 'd_hid': d_hid, 'nlayers': nlayers},
+                        'config': {'d_model': d_model, 'nhead': nhead, 'd_hid': d_hid, 'nlayers': nlayers, 'd_policy': d_policy},
                     }, f'models/{END_MODEL}_v2.pth')
                 else:
                     torch.save(model, f'models/{END_MODEL}.pth')
@@ -213,7 +203,7 @@ def train(
             break
 
     print(f'\nBest Training Loss: {best_loss:.4f}')
-    print(f'Best Testing Loss: {best_test_loss / len(testloader):.4f}')
+    print(f'Best Testing Loss: {best_test_loss:.4f}')
     tracker.close()
 
 

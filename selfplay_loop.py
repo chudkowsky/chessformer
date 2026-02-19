@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import random
 import time
+import dataclasses
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -29,7 +30,7 @@ from torch.amp import GradScaler, autocast
 from chess_loader import get_dataloader_v2
 from chess_moves_to_input_data import get_board_str, switch_move
 from chessformer import ChessTransformerV2
-from model_utils import compute_loss_v2, detect_device, load_model, preprocess_board
+from model_utils import compute_loss_v2, detect_device, find_latest_model, load_model, preprocess_board
 from openings import sample_opening
 from policy import sample_move_v2
 
@@ -85,6 +86,18 @@ def get_temperature(schedule: list[tuple[float, int]], ply: int) -> float:
 
 
 RESULT_MAP = {"1-0": 1.0, "0-1": 0.0, "1/2-1/2": 0.5}
+
+
+def format_time(seconds: float) -> str:
+    """Format seconds as '1h 23m 45s', dropping zero-value leading units."""
+    s = int(seconds)
+    h, s = divmod(s, 3600)
+    m, s = divmod(s, 60)
+    if h > 0:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m > 0:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
 
 
 def mcts_sample_move(
@@ -267,7 +280,7 @@ def generate_games(
             elapsed = time.time() - start
             print(
                 f"  Generated {i + 1}/{config.games_per_gen} games "
-                f"({len(all_lines)} positions, {elapsed:.0f}s)"
+                f"({len(all_lines)} positions, {format_time(elapsed)})"
             )
 
     with open(data_path, "w") as f:
@@ -280,7 +293,7 @@ def generate_games(
     )
     print(
         f"  Results: +{results['1-0']} ={results['1/2-1/2']} -{results['0-1']} "
-        f"({elapsed:.0f}s)"
+        f"({format_time(elapsed)})"
     )
     return str(data_path)
 
@@ -306,7 +319,8 @@ def build_training_data(
 
     # Mix supervised data
     if config.mix_supervised and config.mix_ratio > 0:
-        num_supervised = int(selfplay_count * config.mix_ratio / (1 - config.mix_ratio))
+        ratio = min(config.mix_ratio, 0.99)
+        num_supervised = int(selfplay_count * ratio / (1 - ratio))
         with open(config.mix_supervised) as f:
             supervised_lines = f.readlines()
         mix_rng = random.Random(generation)
@@ -455,21 +469,45 @@ def evaluate_model(
 # --- Main loop ---
 
 
+def _resolve_model_path(path: str) -> str:
+    """Resolve 'latest' to newest model in models/, otherwise return as-is."""
+    if path == "latest":
+        found = find_latest_model()
+        if found is None:
+            raise FileNotFoundError("No models found in models/ directory")
+        return found
+    return path
+
+
 def selfplay_loop(config: SelfPlayConfig) -> None:
     """Main self-play training loop."""
+    config = dataclasses.replace(config, model_path=_resolve_model_path(config.model_path))
     device = detect_device(config.device)
-
-    print(f"Self-play training | Device: {device}")
-    print(f"  Generations: {config.generations} | Games/gen: {config.games_per_gen}")
-    print(f"  Epochs/gen: {config.epochs_per_gen} | Buffer: {config.buffer_size}")
-    print(f"  Temp schedule: {config.temp_schedule}")
-    if config.mix_supervised:
-        print(f"  Supervised mix: {config.mix_ratio:.0%} from {config.mix_supervised}")
-    print()
 
     model, _version, model_cfg = load_model(config.model_path, device)
     num_params = sum(p.numel() for p in model.parameters())
-    print(f"Model: {num_params:,} params\n")
+
+    print(f"\n{'='*60}")
+    print(f"  Self-Play Training")
+    print(f"{'='*60}")
+    print(f"  Model:        {config.model_path}")
+    print(f"  Parameters:   {num_params:,}")
+    print(f"  Device:       {device}")
+    print(f"{'─'*60}")
+    print(f"  Generations:  {config.generations}")
+    print(f"  Games/gen:    {config.games_per_gen}")
+    print(f"  Epochs/gen:   {config.epochs_per_gen}")
+    print(f"  Batch size:   {config.batch_size}")
+    print(f"  LR:           {config.lr}")
+    print(f"  Buffer:       {config.buffer_size} generations")
+    print(f"  Temperature:  {config.temp_schedule}")
+    if config.mcts_sims > 0:
+        print(f"  MCTS:         {config.mcts_sims} sims, cpuct={config.cpuct}")
+    if config.mix_supervised:
+        print(f"  Supervised:   {config.mix_ratio:.0%} from {config.mix_supervised}")
+    if config.eval_games > 0:
+        print(f"  Eval games:   {config.eval_games} vs baseline")
+    print(f"{'='*60}\n")
 
     # Baseline for evaluation (frozen copy of initial model)
     baseline = None
@@ -537,9 +575,21 @@ def selfplay_loop(config: SelfPlayConfig) -> None:
                 model.load_state_dict(best_state)
                 print(f"  -> REJECTED, reverted to {best_gen}")
 
+    # Save best model back to models/ directory
+    models_dir = Path("models")
+    models_dir.mkdir(exist_ok=True)
+    best_path = Path(config.model_path)
+    save_name = best_path.stem + "_selfplay" + best_path.suffix
+    save_path = models_dir / save_name
+    torch.save(
+        {"version": "v2", "state_dict": best_state, "config": model_cfg},
+        save_path,
+    )
+
     print(f"\n{'='*60}")
     print(f"Self-play training complete! ({accepted}/{config.generations} generations accepted)")
     print(f"  Best model: {best_gen}")
+    print(f"  Saved to: {save_path}")
     print(f"{'='*60}")
 
 
@@ -550,7 +600,8 @@ def main() -> None:
     import argparse
 
     parser = argparse.ArgumentParser(description="Self-play training for ChessTransformerV2")
-    parser.add_argument("--model", required=True, help="Path to V2 model checkpoint")
+    parser.add_argument("--model", required=True,
+                        help='Path to V2 model checkpoint, or "latest" for newest in models/')
     parser.add_argument("--output-dir", default="selfplay_data", help="Output directory")
     parser.add_argument("--generations", type=int, default=10)
     parser.add_argument("--games-per-gen", type=int, default=100)

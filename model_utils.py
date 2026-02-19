@@ -7,6 +7,7 @@ play_gui.py, and selfplay_loop.py into a single module.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import chess
 import torch
@@ -38,6 +39,21 @@ def detect_device(preference: str = "auto") -> torch.device:
     if torch.backends.mps.is_available():
         return torch.device("mps")
     return torch.device("cpu")
+
+
+def find_latest_model(directory: str = "models", version: str = "v2") -> str | None:
+    """Find the most recently modified V2 model in directory.
+
+    Returns path string or None if no models found.
+    """
+    models_dir = Path(directory)
+    if not models_dir.is_dir():
+        return None
+    candidates = sorted(models_dir.glob("*_v2.pth"), key=lambda p: p.stat().st_mtime)
+    if not candidates:
+        # fallback: any .pth file
+        candidates = sorted(models_dir.glob("*.pth"), key=lambda p: p.stat().st_mtime)
+    return str(candidates[-1]) if candidates else None
 
 
 def load_model(

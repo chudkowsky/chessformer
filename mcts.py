@@ -57,6 +57,7 @@ class MCTS:
         self.num_simulations = num_simulations
         self.cpuct = cpuct
         self.use_diffusion = use_diffusion
+        self._last_wdl: tuple[float, float, float] = (0.0, 0.5, 0.5)
 
     def search(
         self, board: chess.Board
