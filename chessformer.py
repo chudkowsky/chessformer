@@ -156,6 +156,10 @@ class ChessTransformerV2(nn.Module):
     - Source-destination policy head (structured 64x64 logit matrix)
     - WDLP value head (win/draw/loss + ply prediction)
     - Auxiliary input features (material, check, castling, en passant)
+
+    Phase 2 extension (optional):
+    - Diffusion inference path: backbone latent → DiT denoising → fused policy
+    - Activated by calling attach_diffusion() then forward(use_diffusion=True)
     """
 
     def __init__(
@@ -210,21 +214,19 @@ class ChessTransformerV2(nn.Module):
         self.x_embedding.weight.data.uniform_(-initrange, initrange)
         self.y_embedding.weight.data.uniform_(-initrange, initrange)
 
-    def forward(
+    def encode(
         self,
         board: Tensor,
         features: Tensor | None = None,
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-        """
+    ) -> Tensor:
+        """Run backbone only, return latent representation.
+
         Args:
             board:    [B, 64] int tensor — piece indices (0-12)
             features: [B, 14] float tensor — auxiliary features, or None
 
         Returns:
-            policy_logits: [B, 64, 64] — source-destination move scores
-            promo_logits:  [B, 64, 4]  — promotion piece scores
-            wdl:           [B, 3]      — win/draw/loss probabilities
-            ply:           [B, 1]      — predicted game length
+            latent: [B, 64, d_model] — backbone output before heads
         """
         B = board.shape[0]
 
@@ -236,26 +238,123 @@ class ChessTransformerV2(nn.Module):
 
         # Fuse auxiliary features if provided
         if features is not None:
-            # Broadcast [B, 14] → [B, 64, 14] and concatenate
             feat_expanded = features.unsqueeze(1).expand(-1, 64, -1)
-            combined = self.feature_proj(torch.cat([combined, feat_expanded], dim=-1))
+            combined = self.feature_proj(
+                torch.cat([combined, feat_expanded], dim=-1)
+            )
 
         combined = combined * math.sqrt(self.d_model)
         combined = self.dropout(combined)
 
         # Compute attention biases (once, shared across all layers)
-        shaw_bias = self.shaw_rpe()                    # [nhead, 64, 64]
-        smolgen_bias = self.smolgen(combined)           # [B, nhead, 64, 64]
+        shaw_bias = self.shaw_rpe()                     # [nhead, 64, 64]
+        smolgen_bias = self.smolgen(combined)            # [B, nhead, 64, 64]
         attn_bias = smolgen_bias + shaw_bias.unsqueeze(0)
 
         # Transformer backbone
         x = combined
         for layer in self.layers:
             x = layer(x, attn_bias=attn_bias)
-        x = self.final_norm(x)
+        return self.final_norm(x)
+
+    def forward(
+        self,
+        board: Tensor,
+        features: Tensor | None = None,
+        use_diffusion: bool = False,
+    ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+        """Full forward pass: backbone → (optional diffusion) → heads.
+
+        Args:
+            board:         [B, 64] int tensor — piece indices (0-12)
+            features:      [B, 14] float tensor — auxiliary features, or None
+            use_diffusion: if True and diffusion is attached, run denoising
+
+        Returns:
+            policy_logits: [B, 64, 64] — source-destination move scores
+            promo_logits:  [B, 64, 4]  — promotion piece scores
+            wdl:           [B, 3]      — win/draw/loss probabilities
+            ply:           [B, 1]      — predicted game length
+        """
+        latent = self.encode(board, features)
+
+        # Phase 2: diffusion-augmented inference
+        if use_diffusion and hasattr(self, "diffusion") and self.diffusion is not None:
+            latent = self._diffusion_augment(latent)
 
         # Dual heads
-        policy_logits, promo_logits = self.policy_head(x)
-        wdl, ply = self.value_head(x)
+        policy_logits, promo_logits = self.policy_head(latent)
+        wdl, ply = self.value_head(latent)
 
         return policy_logits, promo_logits, wdl, ply
+
+    def attach_diffusion(
+        self,
+        diffusion: nn.Module,
+        noise_schedule: object,
+        d_dit: int,
+    ) -> None:
+        """Attach Phase 2 diffusion components for augmented inference.
+
+        Creates projection layers (d_model ↔ d_dit) and stores the
+        diffusion model + noise schedule. Call forward(use_diffusion=True)
+        to activate the denoising path.
+
+        Args:
+            diffusion: ChessDiT model (predicts noise)
+            noise_schedule: CosineNoiseSchedule (provides alpha_bar, etc.)
+            d_dit: diffusion latent dimension
+        """
+        self.diffusion = diffusion
+        self.noise_schedule = noise_schedule
+        self.d_dit = d_dit
+        # Project backbone latent → d_dit and back
+        self.latent_to_dit = nn.Linear(self.d_model, d_dit)
+        self.dit_to_latent = nn.Linear(d_dit, self.d_model)
+        # Zero-init the back-projection so diffusion starts as no-op
+        nn.init.zeros_(self.dit_to_latent.weight)
+        nn.init.zeros_(self.dit_to_latent.bias)
+
+    def _diffusion_augment(self, latent: Tensor) -> Tensor:
+        """Denoise imagined future state and fuse with current latent.
+
+        Runs the full reverse diffusion process: starts from pure noise,
+        denoises T steps conditioned on the current backbone latent,
+        then adds the result as a residual.
+
+        Args:
+            latent: [B, 64, d_model] — backbone output
+
+        Returns:
+            augmented: [B, 64, d_model] — latent + diffusion context
+        """
+        ns = self.noise_schedule
+        B = latent.shape[0]
+        device = latent.device
+
+        # Start from pure noise in d_dit space
+        x_t = torch.randn(B, 64, self.d_dit, device=device)
+
+        # Reverse diffusion (T → 0)
+        for t_val in reversed(range(ns.T)):
+            t_tensor = torch.full((B,), t_val, device=device, dtype=torch.long)
+            predicted_noise = self.diffusion(x_t, t_tensor, latent)
+
+            # DDPM update step
+            alpha = ns.alpha[t_val]
+            beta = ns.beta[t_val]
+
+            # Mean: (1/√α_t) * (x_t - (β_t/√(1-ᾱ_t)) * ε_θ)
+            coef = beta / ns.sqrt_one_minus_alpha_bar[t_val]
+            mean = (x_t - coef * predicted_noise) / alpha.sqrt()
+
+            if t_val > 0:
+                # Add noise (not at final step)
+                sigma = ns.posterior_variance[t_val].sqrt()
+                x_t = mean + sigma * torch.randn_like(x_t)
+            else:
+                x_t = mean
+
+        # Project back to d_model and fuse as residual
+        diff_context = self.dit_to_latent(x_t)
+        return latent + diff_context

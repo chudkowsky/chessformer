@@ -1,6 +1,7 @@
 """Tests for ChessTransformerV2 — forward pass, shapes, gradients, heads."""
 
 import torch
+from torch import nn
 import pytest
 from chessformer import ChessTransformerV2
 
@@ -99,6 +100,94 @@ class TestDifferentInputs:
             p1, _, _, _ = model(b1, f)
             p2, _, _, _ = model(b2, f)
         assert not torch.allclose(p1, p2, atol=1e-5)
+
+
+class TestEncode:
+    def test_encode_shape(self, model, batch):
+        """encode() returns [B, 64, d_model] latent."""
+        board, features = batch
+        latent = model.encode(board, features)
+        assert latent.shape == (board.shape[0], 64, model.d_model)
+
+    def test_encode_without_features(self, model, batch):
+        board, _ = batch
+        latent = model.encode(board, features=None)
+        assert latent.shape == (board.shape[0], 64, model.d_model)
+
+    def test_encode_matches_forward(self, model, batch):
+        """encode() output is the same latent used by forward() heads."""
+        model.eval()
+        board, features = batch
+        with torch.no_grad():
+            latent = model.encode(board, features)
+            policy_from_encode, _ = model.policy_head(latent)
+            policy_from_forward, _, _, _ = model(board, features)
+        assert torch.equal(policy_from_encode, policy_from_forward)
+
+    def test_encode_gradient_flows(self, model, batch):
+        board, features = batch
+        latent = model.encode(board, features)
+        loss = latent.sum()
+        loss.backward()
+        assert model.embedding.weight.grad is not None
+        assert model.embedding.weight.grad.abs().sum() > 0
+
+
+class TestDiffusionAttachment:
+    def test_attach_diffusion(self, model):
+        """attach_diffusion() creates projection layers."""
+        from diffusion_model import ChessDiT
+        from noise_schedule import CosineNoiseSchedule
+
+        d_dit = 32
+        dit = ChessDiT(
+            d_dit=d_dit, d_model=model.d_model,
+            nhead=4, d_hid=64, nlayers=1, T=5,
+        )
+        ns = CosineNoiseSchedule(T=5)
+        model.attach_diffusion(dit, ns, d_dit)
+
+        assert hasattr(model, "latent_to_dit")
+        assert hasattr(model, "dit_to_latent")
+        assert model.latent_to_dit.in_features == model.d_model
+        assert model.latent_to_dit.out_features == d_dit
+
+    def test_forward_without_diffusion_unchanged(self, model, batch):
+        """use_diffusion=True without attached diffusion = normal forward."""
+        model.eval()
+        board, features = batch
+        with torch.no_grad():
+            p1, _, _, _ = model(board, features, use_diffusion=False)
+            p2, _, _, _ = model(board, features, use_diffusion=True)
+        assert torch.equal(p1, p2)
+
+    def test_diffusion_augment_changes_output(self, model, batch):
+        """With diffusion attached, use_diffusion=True changes the output.
+
+        dit_to_latent is zero-initialized (so diffusion starts as no-op).
+        We set it to non-zero manually to simulate a trained state.
+        """
+        from diffusion_model import ChessDiT
+        from noise_schedule import CosineNoiseSchedule
+
+        d_dit = 32
+        dit = ChessDiT(
+            d_dit=d_dit, d_model=model.d_model,
+            nhead=4, d_hid=64, nlayers=1, T=3,
+        )
+        ns = CosineNoiseSchedule(T=3)
+        model.attach_diffusion(dit, ns, d_dit)
+
+        # Break zero-init so diffusion output actually affects latent
+        nn.init.normal_(model.dit_to_latent.weight, std=0.1)
+
+        model.eval()
+        board, features = batch
+        with torch.no_grad():
+            p_no_diff, _, _, _ = model(board, features, use_diffusion=False)
+            p_with_diff, _, _, _ = model(board, features, use_diffusion=True)
+        # Diffusion adds context → outputs differ
+        assert not torch.equal(p_no_diff, p_with_diff)
 
 
 class TestDataLoader:
