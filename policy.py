@@ -209,3 +209,32 @@ def greedy_move_v2(
     """Return highest-scoring legal move from V2 policy."""
     moves, probs, _ = legal_move_policy_v2(board, policy_logits, promo_logits)
     return moves[probs.argmax().item()]
+
+
+def sample_move_v2(
+    board: chess.Board,
+    policy_logits: torch.Tensor,
+    promo_logits: torch.Tensor,
+    temperature: float = 1.0,
+) -> Tuple[chess.Move, torch.Tensor]:
+    """Sample a move from the V2 policy with temperature control.
+
+    Args:
+        board:         python-chess Board
+        policy_logits: (64, 64) source-destination logit matrix
+        promo_logits:  (64, 4) per-source promotion piece logits
+        temperature:   0 = greedy, >1 = more random
+
+    Returns:
+        move:     the sampled chess.Move
+        log_prob: scalar tensor — log π(move)
+    """
+    moves, probs, log_probs = legal_move_policy_v2(board, policy_logits, promo_logits)
+    if not moves:
+        raise ValueError("No legal moves available")
+    if temperature <= 0:
+        idx = probs.argmax()
+    else:
+        scaled = log_probs / temperature
+        idx = torch.distributions.Categorical(logits=scaled).sample()
+    return moves[idx.item()], log_probs[idx]

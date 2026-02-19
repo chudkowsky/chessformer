@@ -1,11 +1,16 @@
 import torch
 import chess
 import sys
-from chess_loader import ChessDataset, PIECE_TO_INDEX, compute_features
 import chessformer
 sys.modules['transformer'] = chessformer
 from chessformer import ChessTransformer, ChessTransformerV2
 from chess_moves_to_input_data import get_board_str, switch_player, switch_move
+from model_utils import (
+    detect_device,
+    load_model,
+    preprocess_board as preprocess_v2,
+    preprocess_board_v1 as preprocess,
+)
 from policy import greedy_move_v2
 from torch.utils.data import DataLoader
 from copy import deepcopy
@@ -20,50 +25,10 @@ _parser = argparse.ArgumentParser()
 _parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'])
 _args = _parser.parse_args()
 
-if _args.device != 'auto':
-    device = torch.device(_args.device)
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-elif torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
-    device = torch.device("cpu")
+device = detect_device(_args.device)
 
 # Auto-detect V1/V2 from checkpoint format
-_obj = torch.load(f'models/{MODEL}', weights_only=False, map_location=device)
-if isinstance(_obj, dict) and _obj.get('version') == 'v2':
-    _cfg = _obj['config']
-    model = ChessTransformerV2(**_cfg, dropout=0.0)
-    model.load_state_dict(_obj['state_dict'])
-    model = model.to(device)
-    _model_version = 'v2'
-else:
-    model = _obj if not isinstance(_obj, dict) else _obj
-    if isinstance(model, torch.nn.Module):
-        model = model.to(device)
-    _model_version = 'v1'
-
-# Preprocessing function
-def preprocess(board):
-    """
-    Converts a chess board state to a tensor representation.
-    """
-    board_str = get_board_str(board, white_side=board.turn)
-    piece_to_index = {'.': 0, 'P': 1, 'N': 2, 'B': 3, 'R': 4, 'Q': 5, 'K': 6,
-                      'p': 7, 'n': 8, 'b': 9, 'r': 10, 'q': 11, 'k': 12}
-    board_pieces = [piece_to_index[p] for p in board_str]
-    return torch.tensor([board_pieces], dtype=torch.long).to(device)
-
-
-def preprocess_v2(board):
-    """Convert chess board to V2 inputs: (board_tensor[1,64], features_tensor[1,14])."""
-    board_str = get_board_str(board, white_side=board.turn)
-    board_pieces = [PIECE_TO_INDEX[p] for p in board_str]
-    features = compute_features(board_str)
-    return (
-        torch.tensor([board_pieces], dtype=torch.long).to(device),
-        torch.tensor([features], dtype=torch.float32).to(device),
-    )
+model, _model_version, _model_cfg = load_model(f'models/{MODEL}', device)
 
 # Helper functions for postprocessing
 def sq_to_str(sq):
@@ -113,13 +78,13 @@ if __name__ == '__main__':
         count += 1
         with torch.no_grad():
             if _model_version == 'v2':
-                board_t, feat_t = preprocess_v2(board)
+                board_t, feat_t = preprocess_v2(board, device)
                 policy_logits, promo_logits, wdl, ply = model(board_t, feat_t)
                 move = greedy_move_v2(board, policy_logits[0], promo_logits[0])
                 uci_move = move.uci()
                 print(f'WDL: W={wdl[0,0]:.2f} D={wdl[0,1]:.2f} L={wdl[0,2]:.2f}')
             else:
-                input_tensors = preprocess(board)
+                input_tensors = preprocess(board, device)
                 output = model(input_tensors)
                 uci_move = postprocess_valid(output, board)
         board.push(chess.Move.from_uci(uci_move))

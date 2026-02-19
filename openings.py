@@ -43,7 +43,7 @@ OPENINGS: list[tuple[str, str, str, list[str]]] = [
     ("C55", "Two Knights Defense",           START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6"]),
     ("C56", "Two Knights: Fried Liver",      START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1c4", "g8f6", "f3g5", "d7d5", "e4d5", "c6a5"]),
     ("C60", "Ruy Lopez",                     START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5"]),
-    ("C61", "Ruy Lopez: Bird Defense",       START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "b8d4"]),
+    ("C61", "Ruy Lopez: Bird Defense",       START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "c6d4"]),
     ("C62", "Ruy Lopez: Steinitz Defense",   START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "d7d6"]),
     ("C63", "Ruy Lopez: Schliemann",         START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "f7f5"]),
     ("C65", "Ruy Lopez: Berlin Defense",     START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "g8f6"]),
@@ -53,8 +53,8 @@ OPENINGS: list[tuple[str, str, str, list[str]]] = [
     ("C78", "Ruy Lopez: Archangel",          START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1", "f8b4"]),
     ("C80", "Ruy Lopez: Open",               START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1", "f6e4"]),
     ("C84", "Ruy Lopez: Closed",             START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1", "f8e7"]),
-    ("C88", "Ruy Lopez: Anti-Marshall",      START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1", "f8e7", "h1e1", "b7b5", "a4b3", "e1g8"]),
-    ("C92", "Ruy Lopez: Marshall Attack",    START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1", "f8e7", "h1e1", "b7b5", "a4b3", "e8g8", "c2c3", "d7d5"]),
+    ("C88", "Ruy Lopez: Anti-Marshall",      START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1", "f8e7", "f1e1", "b7b5", "a4b3", "e8g8"]),
+    ("C92", "Ruy Lopez: Marshall Attack",    START_FEN, ["e2e4", "e7e5", "g1f3", "b8c6", "f1b5", "a7a6", "b5a4", "g8f6", "e1g1", "f8e7", "f1e1", "b7b5", "a4b3", "e8g8", "c2c3", "d7d5"]),
 
     # ------------------------------------------------------------------ #
     # Sicilian Defense (1. e4 c5)

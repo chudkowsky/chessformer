@@ -7,10 +7,14 @@ import tarfile
 import torch
 import pygame
 import sys
-import chessformer
-sys.modules['transformer'] = chessformer
-from inference_test import preprocess, preprocess_v2, postprocess_valid
+from inference_test import postprocess_valid
 from chessformer import ChessTransformerV2
+from model_utils import (
+    detect_device,
+    load_model,
+    preprocess_board as preprocess_v2,
+    preprocess_board_v1 as preprocess,
+)
 from policy import greedy_move_v2
 from copy import deepcopy
 
@@ -50,14 +54,7 @@ _parser = argparse.ArgumentParser()
 _parser.add_argument('--device', type=str, default='auto', choices=['auto', 'cuda', 'mps', 'cpu'])
 _args = _parser.parse_args()
 
-if _args.device != 'auto':
-    device = torch.device(_args.device)
-elif torch.cuda.is_available():
-    device = torch.device("cuda")
-elif torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
-    device = torch.device("cpu")
+device = detect_device(_args.device)
 
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 AVAILABLE_MODELS = sorted(glob.glob(os.path.join(_script_dir, "models", "*.pth")))
@@ -142,41 +139,15 @@ def _load_model(path):
     print(f"Path: {path}")
     print(f"Device: {device}")
 
-    obj = torch.load(path, weights_only=False, map_location="cpu")
-    if isinstance(obj, dict) and obj.get('version') == 'v2':
-        # V2 checkpoint: {'version': 'v2', 'state_dict': ..., 'config': ...}
-        cfg = obj['config']
-        m = ChessTransformerV2(**cfg, dropout=0.0)
-        m.load_state_dict(obj['state_dict'])
-    elif isinstance(obj, dict):
-        sd = obj
-        # RL checkpoint: keys prefixed with "adapter.transformer."
-        prefix = "adapter.transformer."
-        if any(k.startswith(prefix) for k in sd):
-            sd = {k[len(prefix):]: v for k, v in sd.items() if k.startswith(prefix)}
-        # Infer architecture from state dict keys
-        if 'embedding.weight' not in sd:
-            raise ValueError(f"Unrecognised checkpoint format in {path}")
-        inp_dict  = sd['embedding.weight'].shape[0]
-        out_dict  = sd['linear_output.weight'].shape[0]
-        d_model   = sd['embedding.weight'].shape[1]
-        d_hid     = sd['transformer_encoder.layers.0.linear1.weight'].shape[0]
-        nlayers   = sum(1 for k in sd if k.endswith('.self_attn.in_proj_weight'))
-        nhead     = max(1, d_model // 64)
-        m = chessformer.ChessTransformer(inp_dict, out_dict, d_model, nhead, d_hid, nlayers, dropout=0.0)
-        m.load_state_dict(sd)
-    else:
-        m = obj
+    m, version, _cfg = load_model(path, device)
 
     num_params = sum(p.numel() for p in m.parameters())
     print(f"Parameters: {num_params:,}")
-    print(f"Version: {'v2' if isinstance(m, ChessTransformerV2) else 'v1'}")
+    print(f"Version: {version}")
 
-    # Print a few weight statistics to verify different models
     first_weight = next(m.parameters())
     print(f"First weight stats: mean={first_weight.mean().item():.6f}, std={first_weight.std().item():.6f}")
 
-    m = m.to(device)
     m.eval()
     print("Model loaded successfully!\n")
     return m
@@ -482,13 +453,13 @@ class ChessGUI:
         def predict(rep_mv=""):
             with torch.no_grad():
                 if is_v2:
-                    board_t, feat_t = preprocess_v2(self.board)
+                    board_t, feat_t = preprocess_v2(self.board, device)
                     policy_logits, promo_logits, _wdl, _ply = mdl(board_t, feat_t)
                     move = greedy_move_v2(self.board, policy_logits[0], promo_logits[0])
                     uci = move.uci()
                     return None if uci == rep_mv else uci
                 else:
-                    input_tensors = preprocess(self.board)
+                    input_tensors = preprocess(self.board, device)
                     output = mdl(input_tensors)
                     return postprocess_valid(output, self.board, rep_mv=rep_mv)
 

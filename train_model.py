@@ -1,7 +1,7 @@
-# Import required libraries
 from chessformer import ChessTransformer, ChessTransformerV2
 from chess_loader import get_dataloader, get_dataloader_v2
 from grok_tracker import GrokTracker, gradfilter_ema
+from model_utils import compute_loss_v2, detect_device
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -44,13 +44,7 @@ inp_ntoken = 13
 out_ntoken = 2
 start_time = time.time()
 
-# Check for GPU availability
-if torch.cuda.is_available():
-    device = torch.device("cuda")
-elif torch.backends.mps.is_available():
-    device = torch.device("mps")
-else:
-    device = torch.device("cpu")
+device = detect_device()
 
 if SCALE != 1:
     factor = d_hid / d_model
@@ -63,12 +57,7 @@ def _compute_loss_v1(model, boards, target, loss_fn):
     return loss_fn(output, target)
 
 
-def _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target):
-    policy_logits, _promo_logits, wdl_pred, _ply_pred = model(boards, features)
-    B = boards.shape[0]
-    policy_loss = F.cross_entropy(policy_logits.reshape(B, -1), from_sq * 64 + to_sq)
-    wdl_loss = -(wdl_target * torch.log(wdl_pred + 1e-8)).sum(dim=-1).mean()
-    return policy_loss + 0.5 * wdl_loss
+_compute_loss_v2 = compute_loss_v2  # alias for backward compat
 
 
 def train(
@@ -458,20 +447,44 @@ if __name__ == '__main__':
                         help='Grokfast amplification factor (default: 2.0)')
     parser.add_argument('--grok-log', type=str, default=None,
                         help='Path to grokking metrics log file (default: grok_{elo}.log)')
-    parser.add_argument('--phase', type=int, default=1, choices=[1, 2],
-                        help='Training phase: 1=supervised policy, 2=diffusion (default: 1)')
+    parser.add_argument('--phase', type=int, default=1, choices=[1, 2, 3],
+                        help='Training phase: 1=supervised, 2=diffusion, 3=selfplay (default: 1)')
     parser.add_argument('--backbone-model', type=str, default=None,
-                        help='Phase 2: path to pre-trained V2 model for backbone')
+                        help='Phase 2/3: path to pre-trained V2 model')
     parser.add_argument('--pgn', type=str, default=None,
                         help='Phase 2: path to PGN file for trajectory extraction')
     parser.add_argument('--horizon', type=int, default=DIFF_HORIZON,
                         help=f'Phase 2: trajectory horizon in half-moves (default: {DIFF_HORIZON})')
+    # Phase 3: self-play flags
+    parser.add_argument('--generations', type=int, default=10,
+                        help='Phase 3: number of generate-train cycles (default: 10)')
+    parser.add_argument('--games-per-gen', type=int, default=100,
+                        help='Phase 3: games to generate per generation (default: 100)')
+    parser.add_argument('--epochs-per-gen', type=int, default=2,
+                        help='Phase 3: training epochs per generation (default: 2)')
+    parser.add_argument('--temp-schedule', type=str, default='1.5:10,1.0:25,0.3:999',
+                        help='Phase 3: temperature schedule as "temp:ply,..." (default: 1.5:10,1.0:25,0.3:999)')
+    parser.add_argument('--max-moves', type=int, default=200,
+                        help='Phase 3: max half-moves per game (default: 200)')
+    parser.add_argument('--buffer-size', type=int, default=5,
+                        help='Phase 3: number of recent generations in replay buffer (default: 5)')
+    parser.add_argument('--mix-supervised', type=str, default=None,
+                        help='Phase 3: path to supervised dataset for mixing')
+    parser.add_argument('--mix-ratio', type=float, default=0.5,
+                        help='Phase 3: fraction of supervised data in training mix (default: 0.5)')
+    parser.add_argument('--eval-games', type=int, default=50,
+                        help='Phase 3: evaluation games per generation (default: 50)')
+    parser.add_argument('--mcts-sims', type=int, default=0,
+                        help='Phase 3: MCTS simulations per move (0=disabled, raw policy)')
+    parser.add_argument('--cpuct', type=float, default=1.25,
+                        help='Phase 3: MCTS exploration constant (default: 1.25)')
+    parser.add_argument('--selfplay-output', type=str, default='selfplay_data',
+                        help='Phase 3: output directory for self-play data (default: selfplay_data)')
     args = parser.parse_args()
     elo = args.elo
     max_elo = elo
     NUM_POS = args.num_pos
-    if args.device != 'auto':
-        device = torch.device(args.device)
+    device = detect_device(args.device)
     if args.lr is not None:
         LR = args.lr
     if args.epochs is not None:
@@ -483,7 +496,37 @@ if __name__ == '__main__':
     if single_run:
         elo = max_elo
 
-    if args.phase == 2:
+    if args.phase == 3:
+        # Phase 3: self-play training
+        if not args.backbone_model:
+            print('Error: --backbone-model is required for --phase 3')
+            sys.exit(1)
+        from selfplay_loop import selfplay_loop, SelfPlayConfig, parse_temp_schedule
+        config = SelfPlayConfig(
+            model_path=args.backbone_model,
+            output_dir=args.selfplay_output,
+            generations=args.generations,
+            games_per_gen=args.games_per_gen,
+            epochs_per_gen=args.epochs_per_gen,
+            batch_size=batch_size,
+            lr=LR,
+            temp_schedule=parse_temp_schedule(args.temp_schedule),
+            max_moves=args.max_moves,
+            resign_threshold=0.95,
+            resign_count=3,
+            draw_threshold=0.80,
+            draw_count=5,
+            buffer_size=args.buffer_size,
+            use_diffusion=False,
+            mix_supervised=args.mix_supervised,
+            mix_ratio=args.mix_ratio,
+            eval_games=args.eval_games,
+            device=args.device,
+            mcts_sims=args.mcts_sims,
+            cpuct=args.cpuct,
+        )
+        selfplay_loop(config)
+    elif args.phase == 2:
         # Phase 2: diffusion training
         if not args.backbone_model:
             print('Error: --backbone-model is required for --phase 2')
