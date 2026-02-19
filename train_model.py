@@ -1,6 +1,7 @@
 # Import required libraries
 from chessformer import ChessTransformer, ChessTransformerV2
 from chess_loader import get_dataloader, get_dataloader_v2
+from grok_tracker import GrokTracker, gradfilter_ema
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -70,7 +71,15 @@ def _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target):
     return policy_loss + 0.5 * wdl_loss
 
 
-def train(model: str = "", patience: int = None, model_version: str = "v1"):
+def train(
+    model: str = "",
+    patience: int = None,
+    model_version: str = "v1",
+    use_grokfast: bool = False,
+    grokfast_alpha: float = 0.98,
+    grokfast_lamb: float = 2.0,
+    grok_log: str | None = None,
+):
     # Model loading or initialization
     # Changed: weights_only=False + map_location for cross-device resume, supports both paths and filenames
     if model:
@@ -91,7 +100,15 @@ def train(model: str = "", patience: int = None, model_version: str = "v1"):
 
     num_params = sum(p.numel() for p in model.parameters())
     print(f'Model: {END_MODEL} ({model_version}) | Dataset: {DATASET}')
-    print(f'Parameters: {num_params:,} | Device: {device}\n')
+    print(f'Parameters: {num_params:,} | Device: {device}')
+    if use_grokfast:
+        print(f'Grokfast: ON (alpha={grokfast_alpha}, lamb={grokfast_lamb})')
+    print()
+
+    # Grokking tracker + Grokfast state
+    grok_log_path = grok_log or f'grok_{END_MODEL}.log'
+    tracker = GrokTracker(model, log_path=grok_log_path)
+    ema_grads = None  # Grokfast EMA state (initialized on first backward)
 
     # Loss Function and Optimizer setup
     loss_fn = nn.CrossEntropyLoss()
@@ -129,8 +146,10 @@ def train(model: str = "", patience: int = None, model_version: str = "v1"):
                         loss = _compute_loss_v1(model, boards, target, loss_fn)
                 optimizer.zero_grad()
                 scaler.scale(loss).backward()
+                scaler.unscale_(optimizer)
+                if use_grokfast:
+                    ema_grads = gradfilter_ema(model, ema_grads, grokfast_alpha, grokfast_lamb)
                 if CLIP:
-                    scaler.unscale_(optimizer)
                     torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                 scaler.step(optimizer)
                 scaler.update()
@@ -143,6 +162,8 @@ def train(model: str = "", patience: int = None, model_version: str = "v1"):
                     loss = _compute_loss_v1(model, boards, target, loss_fn)
                 optimizer.zero_grad()
                 loss.backward()
+                if use_grokfast:
+                    ema_grads = gradfilter_ema(model, ema_grads, grokfast_alpha, grokfast_lamb)
                 if CLIP:
                     torch.nn.utils.clip_grad_norm_(model.parameters(), CLIP)
                 optimizer.step()
@@ -178,6 +199,7 @@ def train(model: str = "", patience: int = None, model_version: str = "v1"):
 
         avg_test_loss = tot_test_loss / len(testloader)
         print(f'Epoch {epoch} done | Train loss: {avg_train_loss:.4f} | Test loss: {avg_test_loss:.4f}')
+        tracker.log_epoch(epoch, avg_train_loss, avg_test_loss)
 
         # Save the best model
         if best_test_loss is None or tot_test_loss < best_test_loss:
@@ -203,6 +225,7 @@ def train(model: str = "", patience: int = None, model_version: str = "v1"):
 
     print(f'\nBest Training Loss: {best_loss:.4f}')
     print(f'Best Testing Loss: {best_test_loss / len(testloader):.4f}')
+    tracker.close()
 
 
 def _compute_diffusion_loss(model, ns, cur_board, cur_feat, fut_board, fut_feat):
@@ -427,6 +450,14 @@ if __name__ == '__main__':
                         help=f'Batch size (default: {batch_size}, lower for less VRAM)')
     parser.add_argument('--model-version', type=str, default='v2', choices=['v1', 'v2'],
                         help='Model architecture version (default: v2)')
+    parser.add_argument('--grokfast', action='store_true',
+                        help='Enable Grokfast EMA gradient filter (accelerates grokking)')
+    parser.add_argument('--grokfast-alpha', type=float, default=0.98,
+                        help='Grokfast EMA decay (default: 0.98)')
+    parser.add_argument('--grokfast-lamb', type=float, default=2.0,
+                        help='Grokfast amplification factor (default: 2.0)')
+    parser.add_argument('--grok-log', type=str, default=None,
+                        help='Path to grokking metrics log file (default: grok_{elo}.log)')
     parser.add_argument('--phase', type=int, default=1, choices=[1, 2],
                         help='Training phase: 1=supervised policy, 2=diffusion (default: 1)')
     parser.add_argument('--backbone-model', type=str, default=None,
@@ -476,4 +507,11 @@ if __name__ == '__main__':
             # Changed: --resume flag takes priority over START_MODEL logic
             START_MODEL = args.resume if args.resume else ""
             END_MODEL = f'{i}_elo_pos_engine'
-            train(model=START_MODEL, patience=args.patience, model_version=args.model_version)
+            train(
+                model=START_MODEL, patience=args.patience,
+                model_version=args.model_version,
+                use_grokfast=args.grokfast,
+                grokfast_alpha=args.grokfast_alpha,
+                grokfast_lamb=args.grokfast_lamb,
+                grok_log=args.grok_log,
+            )
