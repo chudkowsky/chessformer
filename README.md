@@ -10,7 +10,9 @@ cd chessformer
 uv run python play_gui.py
 ```
 
-> Requires [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.10+, and [Git LFS](https://git-lfs.com/) (for model weights). Install LFS with `git lfs install` before cloning.
+> Requires [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.10+, and [Git LFS](https://git-lfs.com/) (for model weights). Install LFS with `git lfs install` before cloning. `uv run` auto-installs all dependencies on first run.
+>
+> **AMD GPU (ROCm):** Install custom torch wheels before running: `uv pip install wheelies/*.whl --force-reinstall`
 
 ## Train your own model
 

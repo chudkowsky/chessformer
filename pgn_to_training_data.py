@@ -30,21 +30,33 @@ def process_pgn(pgn_path, out_path, min_elo=MIN_ELO, max_positions=None):
     games_skipped = 0
     positions_written = 0
 
-    pgn_file = sys.stdin if pgn_path == "/dev/stdin" else open(pgn_path)
+    is_stdin = pgn_path == "/dev/stdin"
+    pgn_file = sys.stdin if is_stdin else open(pgn_path)
+    seekable = not is_stdin
+
     with open(out_path, "w") as out:
         while True:
-            game = chess.pgn.read_game(pgn_file)
-            if game is None:
-                break
+            # Fast path: read headers first (skips move parsing), then only
+            # parse the full game if it passes the Elo/event filter.
+            if seekable:
+                offset = pgn_file.tell()
+                headers = chess.pgn.read_headers(pgn_file)
+                if headers is None:
+                    break
+            else:
+                game = chess.pgn.read_game(pgn_file)
+                if game is None:
+                    break
+                headers = game.headers
 
-            event = game.headers.get("Event", "")
+            event = headers.get("Event", "")
             is_selfplay = event.startswith("SF-SelfPlay")
 
             if not is_selfplay:
                 # Filter by Elo
                 try:
-                    white_elo = int(game.headers.get("WhiteElo", "0"))
-                    black_elo = int(game.headers.get("BlackElo", "0"))
+                    white_elo = int(headers.get("WhiteElo", "0"))
+                    black_elo = int(headers.get("BlackElo", "0"))
                 except ValueError:
                     games_skipped += 1
                     continue
@@ -61,7 +73,11 @@ def process_pgn(pgn_path, out_path, min_elo=MIN_ELO, max_positions=None):
                     games_skipped += 1
                     continue
 
-            # Process moves
+            # Game passes filter — parse moves
+            if seekable:
+                pgn_file.seek(offset)
+                game = chess.pgn.read_game(pgn_file)
+
             board = game.board()
             for move in game.mainline_moves():
                 board_str = get_board_str(board, white_side=board.turn)

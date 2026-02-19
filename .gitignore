@@ -6,3 +6,5 @@ file_filter
 models/
 docs/
 selfplay_data/
+wheelies/
+chessformer.egg-info/
