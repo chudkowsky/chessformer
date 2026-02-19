@@ -603,9 +603,9 @@ def main() -> None:
     parser.add_argument("--model", required=True,
                         help='Path to V2 model checkpoint, or "latest" for newest in models/')
     parser.add_argument("--output-dir", default="selfplay_data", help="Output directory")
-    parser.add_argument("--generations", type=int, default=10)
-    parser.add_argument("--games-per-gen", type=int, default=100)
-    parser.add_argument("--epochs-per-gen", type=int, default=2)
+    parser.add_argument("--generations", type=int, default=20)
+    parser.add_argument("--games-per-gen", type=int, default=200)
+    parser.add_argument("--epochs-per-gen", type=int, default=3)
     parser.add_argument("--batch-size", type=int, default=512)
     parser.add_argument("--lr", type=float, default=1e-5)
     parser.add_argument(
@@ -616,7 +616,7 @@ def main() -> None:
     parser.add_argument("--buffer-size", type=int, default=5)
     parser.add_argument("--mix-supervised", type=str, default=None)
     parser.add_argument("--mix-ratio", type=float, default=0.5)
-    parser.add_argument("--eval-games", type=int, default=50)
+    parser.add_argument("--eval-games", type=int, default=100)
     parser.add_argument("--mcts-sims", type=int, default=0,
                         help="MCTS simulations per move (0=disabled, raw policy)")
     parser.add_argument("--cpuct", type=float, default=1.25,

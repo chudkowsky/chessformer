@@ -59,10 +59,10 @@ uv run python selfplay_loop.py --model latest
 | Argument | Required | Default | Description |
 |---|---|---|---|
 | `--model` | **yes** | — | Path to V2 checkpoint, or `latest` |
-| `--generations` | | `10` | Number of generate-train cycles |
-| `--games-per-gen` | | `100` | Games per generation |
-| `--epochs-per-gen` | | `2` | Training epochs per generation |
-| `--eval-games` | | `50` | Evaluation games vs baseline (0 = skip) |
+| `--generations` | | `20` | Number of generate-train cycles |
+| `--games-per-gen` | | `200` | Games per generation |
+| `--epochs-per-gen` | | `3` | Training epochs per generation |
+| `--eval-games` | | `100` | Evaluation games vs baseline (0 = skip) |
 | `--mcts-sims` | | `0` | MCTS simulations/move (0 = raw policy) |
 | `--cpuct` | | `1.25` | MCTS exploration constant |
 | `--buffer-size` | | `5` | Generations in replay buffer |

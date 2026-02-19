@@ -129,6 +129,26 @@ def preprocess_board(
     )
 
 
+def preprocess_boards_batch(
+    boards: list[chess.Board], device: torch.device
+) -> tuple[Tensor, Tensor]:
+    """Batch version of preprocess_board for multiple boards at once.
+
+    Builds a single [N, 64] int tensor and [N, 14] float tensor from N boards,
+    using one torch.tensor() call each instead of N separate allocations.
+    """
+    pieces_list = []
+    feats_list = []
+    for board in boards:
+        board_str = get_board_str(board, white_side=board.turn)
+        pieces_list.append([PIECE_TO_INDEX[p] for p in board_str])
+        feats_list.append(compute_features(board_str))
+    return (
+        torch.tensor(pieces_list, dtype=torch.long, device=device),
+        torch.tensor(feats_list, dtype=torch.float32, device=device),
+    )
+
+
 def preprocess_board_v1(
     board: chess.Board, device: torch.device
 ) -> Tensor:
