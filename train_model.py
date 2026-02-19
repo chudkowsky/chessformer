@@ -1,8 +1,9 @@
 # Import required libraries
-from chessformer import ChessTransformer
-from chess_loader import get_dataloader
+from chessformer import ChessTransformer, ChessTransformerV2
+from chess_loader import get_dataloader, get_dataloader_v2
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.amp import GradScaler, autocast
 import time
 from datetime import timedelta
@@ -48,18 +49,40 @@ if SCALE != 1:
     d_hid = int(d_model * factor)
 
 
-def train(model: str = "", patience: int = None):
+def _compute_loss_v1(model, boards, target, loss_fn):
+    output = model(boards)
+    return loss_fn(output, target)
+
+
+def _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target):
+    policy_logits, _promo_logits, wdl_pred, _ply_pred = model(boards, features)
+    B = boards.shape[0]
+    policy_loss = F.cross_entropy(policy_logits.reshape(B, -1), from_sq * 64 + to_sq)
+    wdl_loss = -(wdl_target * torch.log(wdl_pred + 1e-8)).sum(dim=-1).mean()
+    return policy_loss + 0.5 * wdl_loss
+
+
+def train(model: str = "", patience: int = None, model_version: str = "v1"):
     # Model loading or initialization
     # Changed: weights_only=False + map_location for cross-device resume, supports both paths and filenames
     if model:
         model_path = model if '/' in model else f'models/{model}'
-        model = torch.load(model_path, weights_only=False, map_location=device).to(device)
+        if model_version == 'v2':
+            checkpoint = torch.load(model_path, weights_only=False, map_location=device)
+            m = ChessTransformerV2(d_model=d_model, nhead=nhead, d_hid=d_hid, nlayers=nlayers, dropout=dropout)
+            m.load_state_dict(checkpoint['state_dict'])
+            model = m.to(device)
+        else:
+            model = torch.load(model_path, weights_only=False, map_location=device).to(device)
         print(f'Resuming from: {model_path}')
     else:
-        model = ChessTransformer(inp_ntoken, out_ntoken, d_model, nhead, d_hid, nlayers, dropout=dropout).to(device)
+        if model_version == 'v2':
+            model = ChessTransformerV2(d_model=d_model, nhead=nhead, d_hid=d_hid, nlayers=nlayers, dropout=dropout).to(device)
+        else:
+            model = ChessTransformer(inp_ntoken, out_ntoken, d_model, nhead, d_hid, nlayers, dropout=dropout).to(device)
 
     num_params = sum(p.numel() for p in model.parameters())
-    print(f'Creating New Model: {END_MODEL}_best_whole.pth\nDataset: {DATASET}')
+    print(f'Model: {END_MODEL} ({model_version}) | Dataset: {DATASET}')
     print(f'Parameters: {num_params:,} | Device: {device}\n')
 
     # Loss Function and Optimizer setup
@@ -72,7 +95,10 @@ def train(model: str = "", patience: int = None):
 
     # Data loaders for training and testing
     # Changed: num_workers=4 for parallel data loading (separate processes, no data race)
-    dataloader, testloader = get_dataloader(DATASET, batch_size=batch_size, num_workers=4, num_pos=NUM_POS)
+    if model_version == 'v2':
+        dataloader, testloader = get_dataloader_v2(DATASET, batch_size=batch_size, num_workers=4, num_pos=NUM_POS)
+    else:
+        dataloader, testloader = get_dataloader(DATASET, batch_size=batch_size, num_workers=4, num_pos=NUM_POS)
 
     # Changed: patience tracks epochs without test loss improvement (early stopping)
     no_improve = 0
@@ -83,13 +109,16 @@ def train(model: str = "", patience: int = None):
     for epoch in range(1, num_epochs + 1):
         model.train()
         total_loss = 0
-        for batch, (boards, target) in enumerate(dataloader):
-            boards, target = boards.to(device), target.to(device)
+        for batch, batch_data in enumerate(dataloader):
             # Changed: mixed precision - forward pass in float16 for ~2x speedup (CUDA only)
             if use_amp:
                 with autocast("cuda"):
-                    output = model(boards)
-                    loss = loss_fn(output, target)
+                    if model_version == 'v2':
+                        boards, features, from_sq, to_sq, promo, wdl_target = [x.to(device) for x in batch_data]
+                        loss = _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target)
+                    else:
+                        boards, target = batch_data[0].to(device), batch_data[1].to(device)
+                        loss = _compute_loss_v1(model, boards, target, loss_fn)
                 optimizer.zero_grad()
                 scaler.scale(loss).backward()
                 if CLIP:
@@ -98,8 +127,12 @@ def train(model: str = "", patience: int = None):
                 scaler.step(optimizer)
                 scaler.update()
             else:
-                output = model(boards)
-                loss = loss_fn(output, target)
+                if model_version == 'v2':
+                    boards, features, from_sq, to_sq, promo, wdl_target = [x.to(device) for x in batch_data]
+                    loss = _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target)
+                else:
+                    boards, target = batch_data[0].to(device), batch_data[1].to(device)
+                    loss = _compute_loss_v1(model, boards, target, loss_fn)
                 optimizer.zero_grad()
                 loss.backward()
                 if CLIP:
@@ -126,10 +159,13 @@ def train(model: str = "", patience: int = None):
         model.eval()
         tot_test_loss = 0
         with torch.no_grad():
-            for batch in testloader:
-                boards, target = batch[0].to(device), batch[1].to(device)
-                output = model(boards)
-                loss = loss_fn(output, target)
+            for batch_data in testloader:
+                if model_version == 'v2':
+                    boards, features, from_sq, to_sq, promo, wdl_target = [x.to(device) for x in batch_data]
+                    loss = _compute_loss_v2(model, boards, features, from_sq, to_sq, wdl_target)
+                else:
+                    boards, target = batch_data[0].to(device), batch_data[1].to(device)
+                    loss = _compute_loss_v1(model, boards, target, loss_fn)
                 tot_test_loss += loss.item()
 
         avg_test_loss = tot_test_loss / len(testloader)
@@ -140,7 +176,14 @@ def train(model: str = "", patience: int = None):
             best_test_loss = tot_test_loss
             no_improve = 0
             if epoch >= min(num_epochs - 2, 3):
-                torch.save(model, f'models/{END_MODEL}.pth')
+                if model_version == 'v2':
+                    torch.save({
+                        'version': 'v2',
+                        'state_dict': model.state_dict(),
+                        'config': {'d_model': d_model, 'nhead': nhead, 'd_hid': d_hid, 'nlayers': nlayers},
+                    }, f'models/{END_MODEL}_v2.pth')
+                else:
+                    torch.save(model, f'models/{END_MODEL}.pth')
                 print(f'  -> Saved model (best test loss)')
         else:
             no_improve += 1
@@ -183,6 +226,8 @@ if __name__ == '__main__':
     # Changed: --batch-size to adjust for different VRAM sizes (1024 for 16GB, 512 for 12GB)
     parser.add_argument('--batch-size', type=int, default=None,
                         help=f'Batch size (default: {batch_size}, lower for less VRAM)')
+    parser.add_argument('--model-version', type=str, default='v1', choices=['v1', 'v2'],
+                        help='Model architecture version (default: v1)')
     args = parser.parse_args()
     elo = args.elo
     max_elo = elo
@@ -206,4 +251,4 @@ if __name__ == '__main__':
         # Changed: --resume flag takes priority over START_MODEL logic
         START_MODEL = args.resume if args.resume else ""
         END_MODEL = f'{i}_elo_pos_engine'
-        train(model=START_MODEL, patience=args.patience)
+        train(model=START_MODEL, patience=args.patience, model_version=args.model_version)

@@ -154,3 +154,58 @@ def greedy_move(
     """
     moves, probs, _ = legal_move_policy(board, from_logits, to_logits, promo_logits)
     return moves[probs.argmax().item()]
+
+
+# --- V2: Source-destination 64x64 policy ---
+
+
+def legal_move_policy_v2(
+    board: chess.Board,
+    policy_logits: torch.Tensor,
+    promo_logits: torch.Tensor,
+) -> Tuple[List[chess.Move], torch.Tensor, torch.Tensor]:
+    """Compute softmax policy from V2 model's 64x64 source-destination logits.
+
+    score(m) = policy_logits[from_sq, to_sq]
+               + promo_logits[from_sq, promo_idx]  (only for promotions)
+
+    Args:
+        board:         python-chess Board
+        policy_logits: (64, 64) source-destination logit matrix
+        promo_logits:  (64, 4) per-source promotion piece logits
+
+    Returns:
+        moves, probs, log_probs — same contract as legal_move_policy
+    """
+    white_turn = (board.turn == chess.WHITE)
+    legal = list(board.legal_moves)
+
+    if not legal:
+        empty = torch.zeros(0, device=policy_logits.device)
+        return [], empty, empty
+
+    scores = []
+    for move in legal:
+        f = chess_sq_to_model_idx(move.from_square, white_turn)
+        t = chess_sq_to_model_idx(move.to_square, white_turn)
+        score = policy_logits[f, t]
+        if move.promotion is not None:
+            p = PROMO_PIECE_TO_IDX[move.promotion]
+            score = score + promo_logits[f, p]
+        scores.append(score)
+
+    scores = torch.stack(scores)
+    log_probs = F.log_softmax(scores, dim=0)
+    probs = log_probs.exp()
+
+    return legal, probs, log_probs
+
+
+def greedy_move_v2(
+    board: chess.Board,
+    policy_logits: torch.Tensor,
+    promo_logits: torch.Tensor,
+) -> chess.Move:
+    """Return highest-scoring legal move from V2 policy."""
+    moves, probs, _ = legal_move_policy_v2(board, policy_logits, promo_logits)
+    return moves[probs.argmax().item()]

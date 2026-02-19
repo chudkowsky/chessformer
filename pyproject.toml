@@ -15,3 +15,8 @@ dependencies = [
 
 [tool.setuptools]
 py-modules = ["chessformer"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]

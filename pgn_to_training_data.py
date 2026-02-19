@@ -1,7 +1,10 @@
 """Parse a PGN file and produce training data for ChessFormer.
 
 Output format (one line per position):
-    <64-char board string> <uci_move>
+    <64-char board string> <uci_move> <result>
+
+Result is from the current player's perspective: 1.0 = win, 0.5 = draw, 0.0 = loss.
+Board is always oriented so the current player plays as white (flipped for black).
 
 For Lichess games: only games where both players have Elo >= MIN_ELO are
 included, and Blitz/Bullet games are skipped.
@@ -78,12 +81,19 @@ def process_pgn(pgn_path, out_path, min_elo=MIN_ELO, max_positions=None):
                 pgn_file.seek(offset)
                 game = chess.pgn.read_game(pgn_file)
 
+            # Parse game result: 1-0 → 1.0 (white win), 0-1 → 0.0, 1/2-1/2 → 0.5
+            result_str = game.headers.get("Result", "*")
+            result_map = {"1-0": 1.0, "0-1": 0.0, "1/2-1/2": 0.5}
+            base_result = result_map.get(result_str, 0.5)
+
             board = game.board()
             for move in game.mainline_moves():
                 board_str = get_board_str(board, white_side=board.turn)
                 uci = move.uci()
                 uci_adjusted = switch_move(uci, wht_turn=board.turn, normal_format=True)
-                out.write(f"{board_str} {uci_adjusted}\n")
+                # Result from current player's perspective (flip for black)
+                result = base_result if board.turn else 1.0 - base_result
+                out.write(f"{board_str} {uci_adjusted} {result}\n")
                 positions_written += 1
                 board.push(move)
 

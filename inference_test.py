@@ -1,11 +1,12 @@
 import torch
 import chess
 import sys
-from chess_loader import ChessDataset
+from chess_loader import ChessDataset, PIECE_TO_INDEX, compute_features
 import chessformer
 sys.modules['transformer'] = chessformer
-from chessformer import ChessTransformer
+from chessformer import ChessTransformer, ChessTransformerV2
 from chess_moves_to_input_data import get_board_str, switch_player, switch_move
+from policy import greedy_move_v2
 from torch.utils.data import DataLoader
 from copy import deepcopy
 import time
@@ -28,7 +29,19 @@ elif torch.backends.mps.is_available():
 else:
     device = torch.device("cpu")
 
-model = torch.load(f'models/{MODEL}', weights_only=False, map_location=device).to(device)
+# Auto-detect V1/V2 from checkpoint format
+_obj = torch.load(f'models/{MODEL}', weights_only=False, map_location=device)
+if isinstance(_obj, dict) and _obj.get('version') == 'v2':
+    _cfg = _obj['config']
+    model = ChessTransformerV2(**_cfg, dropout=0.0)
+    model.load_state_dict(_obj['state_dict'])
+    model = model.to(device)
+    _model_version = 'v2'
+else:
+    model = _obj if not isinstance(_obj, dict) else _obj
+    if isinstance(model, torch.nn.Module):
+        model = model.to(device)
+    _model_version = 'v1'
 
 # Preprocessing function
 def preprocess(board):
@@ -40,6 +53,17 @@ def preprocess(board):
                       'p': 7, 'n': 8, 'b': 9, 'r': 10, 'q': 11, 'k': 12}
     board_pieces = [piece_to_index[p] for p in board_str]
     return torch.tensor([board_pieces], dtype=torch.long).to(device)
+
+
+def preprocess_v2(board):
+    """Convert chess board to V2 inputs: (board_tensor[1,64], features_tensor[1,14])."""
+    board_str = get_board_str(board, white_side=board.turn)
+    board_pieces = [PIECE_TO_INDEX[p] for p in board_str]
+    features = compute_features(board_str)
+    return (
+        torch.tensor([board_pieces], dtype=torch.long).to(device),
+        torch.tensor([features], dtype=torch.float32).to(device),
+    )
 
 # Helper functions for postprocessing
 def sq_to_str(sq):
@@ -86,10 +110,17 @@ if __name__ == '__main__':
 
     count = 0
     while not (board.is_checkmate() or board.is_stalemate() or board.is_insufficient_material() or board.can_claim_draw()):
-        input_tensors = preprocess(board)
         count += 1
         with torch.no_grad():
-            output = model(*input_tensors)
-        uci_move = postprocess_valid(output, board)
+            if _model_version == 'v2':
+                board_t, feat_t = preprocess_v2(board)
+                policy_logits, promo_logits, wdl, ply = model(board_t, feat_t)
+                move = greedy_move_v2(board, policy_logits[0], promo_logits[0])
+                uci_move = move.uci()
+                print(f'WDL: W={wdl[0,0]:.2f} D={wdl[0,1]:.2f} L={wdl[0,2]:.2f}')
+            else:
+                input_tensors = preprocess(board)
+                output = model(input_tensors)
+                uci_move = postprocess_valid(output, board)
         board.push(chess.Move.from_uci(uci_move))
         print(f'Predicted {count}\n', board)
