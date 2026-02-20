@@ -2,90 +2,200 @@
 
 Chess AI built on a Transformer encoder. Looks at the board once, predicts the best move — no search tree.
 
+**Pre-trained model included** — clone and play in under a minute.
+
 ## Quick start
 
 ```bash
+git lfs install                    # one-time LFS setup
 git clone https://github.com/chudkowsky/chessformer.git
 cd chessformer
+uv run python play_gui.py          # play against the AI
+```
+
+### Quick benchmark (vs Stockfish)
+
+```bash
+# Full strength profile (requires Stockfish in PATH or stockfish/)
+uv run benchmark.py full models/2500_elo_pos_engine_v2.pth --games 20
+```
+
+Pre-trained V2 model scores ~Stockfish skill 5 (~1500-1700 Elo).
+
+> Requires [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.12+, and [Git LFS](https://git-lfs.com/) (for model weights). Install LFS with `git lfs install` before cloning. `uv run` auto-installs all dependencies on first run.
+>
+> **AMD GPU (ROCm):** Place ROCm wheels in `wheelies/` and create a `uv.toml` — see [ROCm setup](#rocm-setup).
+
+## Training
+
+### 1. Prepare data
+
+```bash
+# Download + convert Lichess games (stream, low disk usage)
+curl -s https://database.lichess.org/standard/lichess_db_standard_rated_2026-01.pgn.zst \
+  | zstd -d \
+  | uv run python pgn_to_training_data.py /dev/stdin full_datasets/elo_2000_pos.txt 2000 5000000
+```
+
+`pgn_to_training_data.py` args: `<pgn_file> <output_file> <min_elo> [max_positions]`
+
+### 2. Train on data (supervised)
+
+```bash
+uv run python train_model.py 2500 --dataset full_datasets/elite_2500_v2_pos.txt
+```
+
+Best model saved automatically to `models/{elo}_elo_pos_engine_v2.pth`.
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `elo` | **yes** | — | Target Elo label (used in output filename) |
+| `--dataset` | **yes** | — | Path to training data file |
+| `--num-pos` | | `1e6` | Number of positions to load |
+| `--epochs` | | `10` | Number of training epochs |
+| `--patience` | | off | Early stopping after N epochs without improvement |
+| `--batch-size` | | `512` | Batch size (lower for less VRAM) |
+| `--lr` | | `1e-4` | Learning rate (`1e-5` for fine-tuning) |
+| `--resume` | | — | Path to checkpoint to continue training |
+| `--grokfast` | | off | Enable Grokfast EMA gradient filter |
+| `--device` | | `auto` | `auto` / `cuda` / `mps` / `cpu` |
+
+### 3. Self-play (improves model by playing against itself)
+
+```bash
+uv run python selfplay_loop.py --model latest
+```
+
+`--model latest` automatically picks the newest model from `models/`. Best model saved back to `models/` at end.
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--model` | **yes** | — | Path to V2 checkpoint, or `latest` |
+| `--generations` | | `20` | Number of generate-train cycles |
+| `--games-per-gen` | | `200` | Games per generation |
+| `--epochs-per-gen` | | `3` | Training epochs per generation |
+| `--eval-games` | | `100` | Evaluation games vs baseline (0 = skip) |
+| `--mcts-sims` | | `0` | MCTS simulations/move (0 = raw policy) |
+| `--cpuct` | | `1.25` | MCTS exploration constant |
+| `--buffer-size` | | `5` | Generations in replay buffer |
+| `--device` | | `auto` | `auto` / `cuda` / `mps` / `cpu` |
+
+### 4. Self-play with supervised data mix (recommended)
+
+Mixes self-play games with supervised data to prevent forgetting.
+
+```bash
+uv run python selfplay_loop.py --model latest \
+  --mix-supervised full_datasets/elite_2500_v2_pos.txt
+```
+
+| Argument | Required | Default | Description |
+|---|---|---|---|
+| `--mix-supervised` | **yes** | — | Path to supervised dataset |
+| `--mix-ratio` | | `0.5` | Fraction of supervised data in mix |
+
+All other arguments from self-play table above also apply.
+
+### 5. Self-play with MCTS (highest quality, slower)
+
+```bash
+uv run python selfplay_loop.py --model latest \
+  --mix-supervised full_datasets/elite_2500_v2_pos.txt \
+  --mcts-sims 25
+```
+
+~25 forward passes/move instead of 1. Expect ~5s/game instead of ~0.3s.
+
+### ROCm setup
+
+For AMD GPUs, create a `uv.toml` in the project root (gitignored):
+
+```toml
+find-links = ["wheelies"]
+override-dependencies = ["torch==2.9.1+rocm7.2.0.lw.git7e1940d4"]
+```
+
+Then prefix commands with `PYTHONUNBUFFERED=1` for live output. `uv run` will use ROCm wheels automatically.
+
+## Benchmark
+
+Measure model strength against Stockfish or compare two models head-to-head.
+
+```bash
+# Model vs Stockfish (skill 5, 30 games)
+uv run benchmark.py vs-stockfish models/2500_elo_pos_engine_v2.pth --skill 5 --games 30
+
+# Model vs Model (50 games)
+uv run benchmark.py vs-model models/new.pth models/old.pth --games 50
+
+# Full benchmark (multiple Stockfish levels: 1, 3, 5, 7, 10)
+uv run benchmark.py full models/2500_elo_pos_engine_v2.pth --games 20
+```
+
+Output: wins/draws/losses, winrate %, approximate Elo difference.
+
+| Argument | Default | Description |
+|---|---|---|
+| `--games` | `30` / `50` / `20` | Number of games (per skill level for `full`) |
+| `--skill` | `5` | Stockfish skill level 0-20 (`vs-stockfish` only) |
+| `--depth` | `10` | Stockfish search depth |
+| `--skills` | `1,3,5,7,10` | Comma-separated skill levels (`full` only) |
+| `--sf-path` | auto-detect | Path to Stockfish binary |
+| `--device` | `auto` | `auto` / `cuda` / `mps` / `cpu` |
+
+## Play
+
+```bash
 uv run python play_gui.py
 ```
 
-> Requires [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.10+, and [Git LFS](https://git-lfs.com/) (for model weights). Install LFS with `git lfs install` before cloning. `uv run` auto-installs all dependencies on first run.
->
-> **AMD GPU (ROCm):** Install custom torch wheels before running: `uv pip install wheelies/*.whl --force-reinstall`
-
-## Train your own model
-
-**1. Get data** from https://database.lichess.org/ (~29GB compressed / ~200GB decompressed per month)
-
-**2. Filter by ELO + convert** — keeps games where both players are above given ELO:
-
-```bash
-# Option A: stream directly (low disk usage)
-curl -s https://database.lichess.org/standard/lichess_db_standard_rated_2026-01.pgn.zst \
-  | zstd -d \
-  | uv run python pgn_to_training_data.py /dev/stdin full_datasets/elo_2000_pos.txt 2000 1000000
-
-# Option B: download first (needs ~230GB disk, faster)
-wget https://database.lichess.org/standard/lichess_db_standard_rated_2026-01.pgn.zst
-zstd -d lichess_db_standard_rated_2026-01.pgn.zst
-uv run python pgn_to_training_data.py lichess_db_standard_rated_2026-01.pgn full_datasets/elo_2000_pos.txt 2000 1000000
-```
-
-Arguments: `<pgn_file> <output_file> <min_elo> [max_positions]`
-
-**3. Train:**
-
-```bash
-# Train from scratch (batch-size 512 is safe for 12GB+ VRAM)
-uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num-pos 5e6 --batch-size 512 --epochs 100 --patience 5
-
-# Fine-tune existing model with lower learning rate
-uv run python train_model.py 2000 --resume models/2000_elo_pos_engine.pth --dataset full_datasets/elo_2000_pos.txt --num-pos 5e6 --batch-size 512 --lr 1e-5 --epochs 50 --patience 5
-
-# Mac / CPU
-uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num-pos 1e6 --device mps     # Mac
-uv run python train_model.py 2000 --dataset full_datasets/elo_2000_pos.txt --num-pos 1e6 --device cpu     # CPU
-```
-
-| Flag | Default | Description |
-|---|---|---|
-| `--dataset` | `full_datasets/elo_{elo}_pos.txt` | Path to training data file |
-| `--num-pos` | `1000000` | Number of positions to load |
-| `--device` | `auto` | `auto`, `cuda`, `mps`, or `cpu` |
-| `--resume` | — | Path to existing model to continue training |
-| `--lr` | `1e-4` | Learning rate (lower for fine-tuning, e.g. `1e-5`) |
-| `--epochs` | `10` | Number of training epochs |
-| `--patience` | — | Early stopping: stop after N epochs without improvement |
-| `--batch-size` | `1024` | Batch size (lower for less VRAM, e.g. `512` for 12GB) |
-
-> **AMD GPU (ROCm):** Prefix with `TORCH_ROCM_AOTRITON_ENABLE_EXPERIMENTAL=1` to enable Flash Attention.
-
-**4. Play:** `uv run python play_gui.py` — trained model appears in model selection automatically.
-
-## Architecture
-
-64 board squares → piece/file/rank embeddings → 12-layer Transformer encoder (8 heads, d_model=512) → per-square (from_score, to_score) → highest-ranked legal move is played.
-
-~25M parameters | batch size 1024 | AdamW (LR 1e-4) | AMP on CUDA/ROCm
-
-## Game modes
+Trained models in `models/` appear in model selection automatically.
 
 | Mode | Description |
 |---|---|
 | Play White/Black | Human vs AI |
 | AI vs AI | Model plays both sides |
-| vs Stockfish | Model vs Stockfish (optional, for move quality analysis) |
+| vs Stockfish | Model vs Stockfish (move quality analysis) |
+
+## Pre-trained models
+
+| Model | Architecture | Strength | Size |
+|---|---|---|---|
+| `2500_elo_pos_engine_v2.pth` | V2 (42M params) | ~Stockfish skill 5 | 163 MB |
+| `2000_elo_pos_engine.pth` | V1 (25M params) | ~Stockfish skill 2 | 107 MB |
+
+Models are stored via Git LFS and downloaded automatically on `git clone` (requires `git lfs install`).
+
+## Architecture
+
+### V2 (current)
+64 squares → piece/file/rank embeddings + 14 auxiliary features → 12-layer Transformer encoder (8 heads, d_model=512, Shaw RPE + Smolgen attention bias) → source-destination policy head (64x64 bilinear) + WDLP value head (win/draw/loss + ply).
+
+~42M parameters | batch size 512 | AdamW (LR 1e-4) | AMP on CUDA/ROCm | Grokfast optional
+
+### V1 (legacy)
+64 squares → embeddings → 12-layer Transformer → per-square (from_score, to_score). ~25M parameters.
 
 ## File reference
 
 | File | Purpose |
 |---|---|
-| `chessformer.py` | Model architecture |
-| `train_model.py` | Training loop |
-| `pgn_to_training_data.py` | PGN → training data (ELO filter) |
+| `chessformer.py` | V1 + V2 model architecture |
+| `attention.py` | Shaw RPE, Smolgen, Transformer block |
+| `train_model.py` | Supervised training loop |
+| `selfplay_loop.py` | Self-play: game generation + gated training |
+| `mcts.py` | Monte Carlo Tree Search (AlphaZero-style) |
+| `model_utils.py` | Model loading, device detection, preprocessing, loss |
+| `benchmark.py` | Model strength evaluation (vs Stockfish / vs model) |
+| `policy.py` | Move selection from model logits |
+| `grok_tracker.py` | Grokking detection + Grokfast EMA filter |
+| `diffusion_model.py` | ChessDiT (AdaLN-Zero denoising transformer) |
+| `noise_schedule.py` | Cosine noise schedule (DDPM) |
+| `trajectory_loader.py` | Trajectory pair extraction from PGN |
+| `chess_loader.py` | V1/V2 data loaders |
+| `pgn_to_training_data.py` | PGN → training data (ELO filter + game result) |
 | `play_gui.py` | Pygame GUI |
-| `play_against.py` | CLI game runner |
 | `models/` | Trained weights (Git LFS) |
+| `tests/` | 161 tests (pytest) |
 
 [MIT License](https://github.com/ncylich/chessformer/blob/main/LICENSE)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "chessformer"
 version = "0.1.0"
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 dependencies = [
     "torch>=2.0.0",
     "numpy>=1.21.0",
@@ -15,3 +15,9 @@ dependencies = [
 
 [tool.setuptools]
 py-modules = ["chessformer"]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+]
+
