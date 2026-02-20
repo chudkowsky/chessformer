@@ -2,13 +2,25 @@
 
 Chess AI built on a Transformer encoder. Looks at the board once, predicts the best move — no search tree.
 
+**Pre-trained model included** — clone and play in under a minute.
+
 ## Quick start
 
 ```bash
+git lfs install                    # one-time LFS setup
 git clone https://github.com/chudkowsky/chessformer.git
 cd chessformer
-uv run python play_gui.py
+uv run python play_gui.py          # play against the AI
 ```
+
+### Quick benchmark (vs Stockfish)
+
+```bash
+# Full strength profile (requires Stockfish in PATH or stockfish/)
+uv run benchmark.py full models/2500_elo_pos_engine_v2.pth --games 20
+```
+
+Pre-trained V2 model scores ~Stockfish skill 5 (~1500-1700 Elo).
 
 > Requires [uv](https://docs.astral.sh/uv/getting-started/installation/), Python 3.12+, and [Git LFS](https://git-lfs.com/) (for model weights). Install LFS with `git lfs install` before cloning. `uv run` auto-installs all dependencies on first run.
 >
@@ -144,6 +156,15 @@ Trained models in `models/` appear in model selection automatically.
 | Play White/Black | Human vs AI |
 | AI vs AI | Model plays both sides |
 | vs Stockfish | Model vs Stockfish (move quality analysis) |
+
+## Pre-trained models
+
+| Model | Architecture | Strength | Size |
+|---|---|---|---|
+| `2500_elo_pos_engine_v2.pth` | V2 (42M params) | ~Stockfish skill 5 | 163 MB |
+| `2000_elo_pos_engine.pth` | V1 (25M params) | ~Stockfish skill 2 | 107 MB |
+
+Models are stored via Git LFS and downloaded automatically on `git clone` (requires `git lfs install`).
 
 ## Architecture
 
