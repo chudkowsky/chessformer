@@ -184,7 +184,7 @@ def train(
         if best_test_loss is None or avg_test_loss < best_test_loss:
             best_test_loss = avg_test_loss
             no_improve = 0
-            if epoch >= min(num_epochs - 2, 3):
+            if True:
                 if model_version == 'v2':
                     torch.save({
                         'version': 'v2',
@@ -377,7 +377,7 @@ def train_diffusion(
         if best_test_loss is None or test_loss < best_test_loss:
             best_test_loss = test_loss
             no_improve = 0
-            if epoch >= min(num_epochs - 2, 3):
+            if True:
                 torch.save({
                     'version': 'v2+diff',
                     'state_dict': model.state_dict(),
@@ -468,6 +468,10 @@ if __name__ == '__main__':
                         help='Phase 3: MCTS simulations per move (0=disabled, raw policy)')
     parser.add_argument('--cpuct', type=float, default=1.25,
                         help='Phase 3: MCTS exploration constant (default: 1.25)')
+    parser.add_argument('--dirichlet-alpha', type=float, default=0.3,
+                        help='Phase 3: Dirichlet noise alpha (default: 0.3)')
+    parser.add_argument('--dirichlet-epsilon', type=float, default=0.25,
+                        help='Phase 3: Dirichlet noise weight (0=off, default: 0.25)')
     parser.add_argument('--selfplay-output', type=str, default='selfplay_data',
                         help='Phase 3: output directory for self-play data (default: selfplay_data)')
     args = parser.parse_args()
@@ -514,6 +518,8 @@ if __name__ == '__main__':
             device=args.device,
             mcts_sims=args.mcts_sims,
             cpuct=args.cpuct,
+            dirichlet_alpha=args.dirichlet_alpha,
+            dirichlet_epsilon=args.dirichlet_epsilon,
         )
         selfplay_loop(config)
     elif args.phase == 2:

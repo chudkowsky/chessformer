@@ -56,6 +56,8 @@ def default_config():
         device="cpu",
         mcts_sims=0,
         cpuct=1.25,
+        dirichlet_alpha=0.3,
+        dirichlet_epsilon=0.25,
     )
 
 
@@ -216,6 +218,8 @@ class TestGenerateGame:
             device="cpu",
             mcts_sims=0,
             cpuct=1.25,
+            dirichlet_alpha=0.3,
+            dirichlet_epsilon=0.25,
         )
         opening = sample_opening(random.Random(42))
         lines = generate_game(
@@ -308,6 +312,8 @@ def mcts_config():
         device="cpu",
         mcts_sims=5,
         cpuct=1.25,
+        dirichlet_alpha=0.3,
+        dirichlet_epsilon=0.25,
     )
 
 

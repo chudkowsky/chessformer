@@ -63,6 +63,8 @@ class SelfPlayConfig:
     device: str
     mcts_sims: int            # 0 = disabled (raw policy), >0 = MCTS simulations per move
     cpuct: float              # MCTS exploration constant
+    dirichlet_alpha: float    # Dirichlet noise parameter (lower = spikier)
+    dirichlet_epsilon: float  # Noise mixing weight (0 = no noise, 0.25 = AlphaZero default)
 
 
 # --- Pure helpers ---
@@ -158,6 +160,8 @@ def generate_game(
             num_simulations=config.mcts_sims,
             cpuct=config.cpuct,
             use_diffusion=config.use_diffusion,
+            dirichlet_alpha=config.dirichlet_alpha,
+            dirichlet_epsilon=config.dirichlet_epsilon,
         )
 
     model.eval()
@@ -502,7 +506,8 @@ def selfplay_loop(config: SelfPlayConfig) -> None:
     print(f"  Buffer:       {config.buffer_size} generations")
     print(f"  Temperature:  {config.temp_schedule}")
     if config.mcts_sims > 0:
-        print(f"  MCTS:         {config.mcts_sims} sims, cpuct={config.cpuct}")
+        print(f"  MCTS:         {config.mcts_sims} sims, cpuct={config.cpuct}, "
+              f"Dir(α={config.dirichlet_alpha}, ε={config.dirichlet_epsilon})")
     if config.mix_supervised:
         print(f"  Supervised:   {config.mix_ratio:.0%} from {config.mix_supervised}")
     if config.eval_games > 0:
@@ -621,6 +626,10 @@ def main() -> None:
                         help="MCTS simulations per move (0=disabled, raw policy)")
     parser.add_argument("--cpuct", type=float, default=1.25,
                         help="MCTS exploration constant")
+    parser.add_argument("--dirichlet-alpha", type=float, default=0.3,
+                        help="Dirichlet noise alpha (lower=spikier, default: 0.3)")
+    parser.add_argument("--dirichlet-epsilon", type=float, default=0.25,
+                        help="Dirichlet noise weight (0=off, 0.25=AlphaZero default)")
     parser.add_argument(
         "--device", type=str, default="auto", choices=["auto", "cuda", "mps", "cpu"],
     )
@@ -648,6 +657,8 @@ def main() -> None:
         device=args.device,
         mcts_sims=args.mcts_sims,
         cpuct=args.cpuct,
+        dirichlet_alpha=args.dirichlet_alpha,
+        dirichlet_epsilon=args.dirichlet_epsilon,
     )
     selfplay_loop(config)
 

@@ -105,6 +105,32 @@ override-dependencies = ["torch==2.9.1+rocm7.2.0.lw.git7e1940d4"]
 
 Then prefix commands with `PYTHONUNBUFFERED=1` for live output. `uv run` will use ROCm wheels automatically.
 
+## Benchmark
+
+Measure model strength against Stockfish or compare two models head-to-head.
+
+```bash
+# Model vs Stockfish (skill 5, 30 games)
+uv run benchmark.py vs-stockfish models/2500_elo_pos_engine_v2.pth --skill 5 --games 30
+
+# Model vs Model (50 games)
+uv run benchmark.py vs-model models/new.pth models/old.pth --games 50
+
+# Full benchmark (multiple Stockfish levels: 1, 3, 5, 7, 10)
+uv run benchmark.py full models/2500_elo_pos_engine_v2.pth --games 20
+```
+
+Output: wins/draws/losses, winrate %, approximate Elo difference.
+
+| Argument | Default | Description |
+|---|---|---|
+| `--games` | `30` / `50` / `20` | Number of games (per skill level for `full`) |
+| `--skill` | `5` | Stockfish skill level 0-20 (`vs-stockfish` only) |
+| `--depth` | `10` | Stockfish search depth |
+| `--skills` | `1,3,5,7,10` | Comma-separated skill levels (`full` only) |
+| `--sf-path` | auto-detect | Path to Stockfish binary |
+| `--device` | `auto` | `auto` / `cuda` / `mps` / `cpu` |
+
 ## Play
 
 ```bash
@@ -139,6 +165,7 @@ Trained models in `models/` appear in model selection automatically.
 | `selfplay_loop.py` | Self-play: game generation + gated training |
 | `mcts.py` | Monte Carlo Tree Search (AlphaZero-style) |
 | `model_utils.py` | Model loading, device detection, preprocessing, loss |
+| `benchmark.py` | Model strength evaluation (vs Stockfish / vs model) |
 | `policy.py` | Move selection from model logits |
 | `grok_tracker.py` | Grokking detection + Grokfast EMA filter |
 | `diffusion_model.py` | ChessDiT (AdaLN-Zero denoising transformer) |
@@ -148,6 +175,6 @@ Trained models in `models/` appear in model selection automatically.
 | `pgn_to_training_data.py` | PGN → training data (ELO filter + game result) |
 | `play_gui.py` | Pygame GUI |
 | `models/` | Trained weights (Git LFS) |
-| `tests/` | 143 tests (pytest) |
+| `tests/` | 161 tests (pytest) |
 
 [MIT License](https://github.com/ncylich/chessformer/blob/main/LICENSE)

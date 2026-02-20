@@ -19,6 +19,7 @@ import math
 from dataclasses import dataclass, field
 
 import chess
+import numpy as np
 import torch
 
 from model_utils import preprocess_board, preprocess_boards_batch
@@ -61,6 +62,8 @@ class MCTS:
         cpuct: float = 1.25,
         use_diffusion: bool = False,
         batch_size: int = 8,
+        dirichlet_alpha: float = 0.3,
+        dirichlet_epsilon: float = 0.25,
     ):
         self.model = model
         self.device = device
@@ -68,6 +71,8 @@ class MCTS:
         self.cpuct = cpuct
         self.use_diffusion = use_diffusion
         self.batch_size = batch_size
+        self.dirichlet_alpha = dirichlet_alpha
+        self.dirichlet_epsilon = dirichlet_epsilon
         self._last_wdl: tuple[float, float, float] = (0.0, 0.5, 0.5)
 
     def search(
@@ -83,6 +88,17 @@ class MCTS:
         root = MCTSNode(board=board.copy())
         self._expand_and_evaluate(root)
         root_wdl_tuple = self._last_wdl
+
+        # Dirichlet noise at root — forces exploration of unexpected moves
+        if root.children and self.dirichlet_epsilon > 0:
+            noise = np.random.dirichlet(
+                [self.dirichlet_alpha] * len(root.children)
+            )
+            for child, eta in zip(root.children.values(), noise):
+                child.prior = (
+                    (1 - self.dirichlet_epsilon) * child.prior
+                    + self.dirichlet_epsilon * eta
+                )
 
         remaining = self.num_simulations
         while remaining > 0:
