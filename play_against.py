@@ -35,14 +35,18 @@ for _tar_path in glob.glob(os.path.join(_base, "*stockfish*.tar*")):
     break
 
 import shutil as _shutil
+import subprocess as _subprocess
 
-_sf_default = ""
-for _bin in glob.glob(os.path.join(_base, "stockfish", "stockfish*")):
-    if os.path.isfile(_bin) and not _bin.endswith((".tar", ".zip")):
-        _sf_default = _bin
-        break
+_sf_default = _shutil.which("stockfish") or ""
 if not _sf_default:
-    _sf_default = _shutil.which("stockfish") or ""
+    for _bin in glob.glob(os.path.join(_base, "stockfish", "stockfish*")):
+        if os.path.isfile(_bin) and not _bin.endswith((".tar", ".zip")):
+            try:
+                _subprocess.run([_bin, "quit"], capture_output=True, timeout=5)
+                _sf_default = _bin
+            except (OSError, _subprocess.TimeoutExpired):
+                pass  # wrong platform binary
+            break
 
 if _sf_default:
     _sf_path = input(f"Path to Stockfish binary (Enter for {os.path.basename(_sf_default)}, 'n' to skip): ").strip()

@@ -75,24 +75,34 @@ class MatchResult:
 
 
 def _find_stockfish() -> str:
-    """Find Stockfish binary, checking common locations."""
+    """Find a working Stockfish binary, checking PATH first then local dir."""
     import shutil
+    import subprocess
     from pathlib import Path
 
+    # Prefer system-installed Stockfish (e.g. brew install stockfish)
+    found = shutil.which("stockfish")
+    if found:
+        return found
+
+    # Fall back to local binary (must be runnable on this platform)
     candidates = [
         Path("stockfish/stockfish-ubuntu-x86-64-avx2"),
         Path("stockfish/stockfish"),
     ]
     for p in candidates:
         if p.is_file():
-            return str(p)
-
-    found = shutil.which("stockfish")
-    if found:
-        return found
+            try:
+                subprocess.run(
+                    [str(p), "quit"], capture_output=True, timeout=5,
+                )
+                return str(p)
+            except (OSError, subprocess.TimeoutExpired):
+                continue  # wrong platform or broken binary
 
     raise FileNotFoundError(
-        "Stockfish not found. Place it in stockfish/ or ensure it's in PATH."
+        "Stockfish not found. Install with 'brew install stockfish' (macOS) "
+        "or place a binary in stockfish/."
     )
 
 
