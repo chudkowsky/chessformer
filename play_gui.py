@@ -71,12 +71,16 @@ for _tar_path in glob.glob(os.path.join(_base, "*stockfish*.tar*")):
         print(f"Stockfish extracted to: {os.path.join(_base, 'stockfish')}")
     break
 
-# Changed: auto-detect stockfish binary from stockfish/ dir, skip prompt if found
+# Auto-detect stockfish: local binary first, then system PATH
+import shutil as _shutil
+
 _sf_default = ""
 for _bin in glob.glob(os.path.join(_base, "stockfish", "stockfish*")):
     if os.path.isfile(_bin) and not _bin.endswith((".tar", ".zip")):
         _sf_default = _bin
         break
+if not _sf_default:
+    _sf_default = _shutil.which("stockfish") or ""
 
 if _sf_default:
     _sf_path = input(f"Path to Stockfish binary (Enter for {os.path.basename(_sf_default)}, 'n' to skip): ").strip()
@@ -219,11 +223,27 @@ class ChessGUI:
         self.sf_black_btn = pygame.Rect(cx +  20, 300, 110, bh)
 
     def _init_piece_font(self, size):
-        for name in ["DejaVu Sans", "Noto Sans Symbols2", "Noto Sans Symbols",
-                      "Symbola", "FreeSerif", "Segoe UI Symbol", "Arial Unicode MS"]:
+        # Try bundled font first (works on all platforms)
+        bundled = os.path.join(_script_dir, "fonts", "NotoSansSymbols2-Regular.ttf")
+        if os.path.isfile(bundled):
+            try:
+                return pygame.font.Font(bundled, size)
+            except Exception:
+                pass
+
+        # Fallback: search system fonts
+        candidates = [
+            "DejaVu Sans", "Noto Sans Symbols2", "Noto Sans Symbols",
+            "Symbola", "FreeSerif", "Segoe UI Symbol", "Arial Unicode MS",
+            "Apple Symbols",
+        ]
+        test_char = "\u2654"  # ♔ White King
+        for name in candidates:
             font = pygame.font.SysFont(name, size)
             if font.get_height() > 0:
-                return font
+                surf = font.render(test_char, True, (255, 255, 255))
+                if surf.get_width() > size // 4:
+                    return font
         return pygame.font.SysFont(None, size)
 
     # --- Coordinate helpers ---
